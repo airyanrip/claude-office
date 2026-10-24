@@ -1,0 +1,1 @@
+{ "name": "session-panel", "version": "0.1.0", "description": "세션 현황(프롬프트 수, 도구별 호출 수, 최근 도구 호출)을 보여 주는 사이드 패널", "types": "./types/index.d.ts" }
