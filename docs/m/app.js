@@ -1,0 +1,786 @@
+/* Claude Office 휴대폰 웹앱: PC의 세션 사무실(원격 조종)에 붙어 세션을 보고 명령을 보낸다.
+ * 연결 정보(열쇠·채널·주소)는 QR 링크의 # 뒤로만 받아 이 기기에 저장하고 주소 표시줄에서는 바로 지운다.
+ * PC에서 온 글은 모두 textContent로만 넣는다 (HTML로 해석하지 않음). */
+'use strict';
+
+// ───────────── 문구 ─────────────
+const STR = {
+  office: ['사무실', 'Office', 'オフィス', '办公室'],
+  talk: ['세션톡', 'SessionTalk', 'セッショントーク', '会话聊天'],
+  sec: ['비서', 'Secretary', '秘書', '秘书'],
+  meet: ['회의실', 'Meeting', '会議室', '会议室'],
+  more: ['더보기', 'More', 'その他', '更多'],
+  busy: ['작업 중', 'Working', '作業中', '工作中'], wait: ['확인 필요', 'Needs input', '確認待ち', '待确认'],
+  idle: ['휴식', 'Idle', '休憩', '休息'], sleep: ['조는 중', 'Dozing', '居眠り', '打瞌睡'],
+  connecting: ['PC 찾는 중…', 'Finding your PC…', 'PCを探しています…', '正在寻找电脑…'],
+  connected: ['연결됨', 'Connected', '接続中', '已连接'],
+  pcOff: ['PC의 원격이 꺼져 있어요', 'Remote is off on your PC', 'PCのリモートがオフです', '电脑上的远程已关闭'],
+  pcOffSub: ['PC의 세션 사무실 > 원격 조종에서 [원격 켜기]를 눌러 주세요. 켜지면 자동으로 다시 연결해요.',
+    'Press [Turn on remote] in Session Office > Remote on your PC. This reconnects automatically.',
+    'PCのセッションオフィス > リモート操作で[リモートをオン]を押してください。オンになると自動で再接続します。',
+    '请在电脑的会话办公室 > 远程控制中点击[开启远程]。开启后会自动重新连接。'],
+  notPaired: ['아직 PC와 연결되지 않았어요', 'Not paired with a PC yet', 'まだPCと接続されていません', '尚未与电脑配对'],
+  notPairedSub: ['PC의 세션 사무실 > 원격 조종 > [휴대폰 연결하기]의 QR을 휴대폰 카메라로 찍어 주세요.',
+    'Scan the QR in Session Office > Remote > [Connect a phone] on your PC with your phone camera.',
+    'PCのセッションオフィス > リモート操作 > [スマホを接続]のQRをスマホのカメラで読み取ってください。',
+    '请用手机相机扫描电脑上 会话办公室 > 远程控制 > [连接手机] 中的二维码。'],
+  revoked: ['PC에서 이 기기의 연결을 끊었어요', 'This device was disconnected on the PC', 'PCでこの端末の接続が解除されました', '电脑已断开此设备'],
+  noSessions: ['켜져 있는 세션이 없어요', 'No sessions are running', '起動中のセッションがありません', '没有正在运行的会话'],
+  waitNote: ['PC 터미널에서 확인(승인)을 기다리고 있어요', 'Waiting for approval in the PC terminal', 'PCのターミナルで承認を待っています', '正在电脑终端等待确认'],
+  send: ['보내기', 'Send', '送信', '发送'], sent: ['보냈어요', 'Sent', '送信しました', '已发送'],
+  cmdPh: ['이 세션에 보낼 명령', 'Command for this session', 'このセッションへの指示', '发给此会话的指令'],
+  qa: ['대화', 'Q&A', '会話', '对话'], log: ['작업 로그', 'Log', '作業ログ', '工作日志'], tasks: ['작업 분배', 'Tasks', 'タスク', '任务'],
+  noQa: ['아직 기록이 없어요', 'Nothing yet', 'まだ記録がありません', '还没有记录'],
+  all: ['전체', 'All', 'すべて', '全部'], me: ['나', 'Me', '自分', '我'], read: ['읽음', 'Read', '既読', '已读'],
+  talkPh: ['메시지 보내기', 'Message', 'メッセージ', '发送消息'], pickRoom: ['위에서 세션을 고르면 명령을 보낼 수 있어요', 'Pick a session above to send a command', '上でセッションを選ぶと指示を送れます', '在上方选择会话即可发送指令'],
+  brief: ['브리핑 받기', 'Get briefing', 'ブリーフィング', '获取简报'], briefing: ['브리핑 중…', 'Briefing…', 'ブリーフィング中…', '简报中…'],
+  noSec: ['비서 세션이 없어요 · PC에서 만들어 주세요', 'No secretary session · create one on the PC', '秘書セッションがありません · PCで作成してください', '没有秘书会话 · 请在电脑上创建'],
+  noSugg: ['보여 줄 제안이 없어요', 'No suggestions', '提案はありません', '没有建议'],
+  kinds: { next: ['다음 업무', 'Next task', '次の作業', '下一项'], check: ['확인 권유', 'Check this', '確認推奨', '建议确认'],
+    warn: ['주의', 'Warning', '注意', '注意'], info: ['참고', 'Info', '参考', '参考'] },
+  markDone: ['확인함', 'Done', '確認済み', '已确认'], undo: ['다시 보이기', 'Show again', '再表示', '重新显示'], link: ['링크 열기', 'Open link', 'リンクを開く', '打开链接'],
+  showDone: ['확인한 것도 보기', 'Show done', '確認済みも表示', '显示已确认'],
+  invite: ['초대할 세션', 'Invite sessions', '招待するセッション', '邀请会话'], range: ['보고 범위', 'Report range', '報告範囲', '汇报范围'],
+  turnN: ['최근 {0}턴', 'Last {0} turns', '直近{0}ターン', '最近 {0} 轮'], turn1: ['최근 1턴', 'Last turn', '直近1ターン', '最近 1 轮'],
+  start: ['회의 시작', 'Start meeting', '会議を開始', '开始会议'], end: ['회의 끝내기', 'End meeting', '会議を終了', '结束会议'],
+  moderator: ['회의 진행', 'Moderator', '司会', '主持人'],
+  mWelcome: ['회의에 부를 세션을 골라 [회의 시작]을 눌러 주세요.', 'Pick the sessions to call in and press [Start meeting].', '会議に呼ぶセッションを選んで[会議を開始]を押してください。', '选择要参会的会话并点击[开始会议]。'],
+  mWaiting: ['보고를 기다리는 중이에요… ({0}/{1})', 'Waiting for reports… ({0}/{1})', '報告を待っています… ({0}/{1})', '正在等待汇报… ({0}/{1})'],
+  mDone: ['모든 보고가 끝났어요.', 'All reports are done.', 'すべての報告が終わりました。', '所有汇报都结束了。'],
+  next: ['다음 할 일 · ', 'Next · ', '次にやること · ', '下一步 · '],
+  stDone: ['완료', 'Done', '完了', '完成'], stPartial: ['일부', 'Partial', '一部', '部分'], stTodo: ['못 함', 'Not done', '未対応', '未完成'],
+  endQ: ['회의를 끝낼까요?', 'End the meeting?', '会議を終了しますか？', '结束会议吗？'],
+  launch: ['세션 켜기', 'Launch session', 'セッション起動', '启动会话'], resume: ['켜기', 'Start', '起動', '启动'],
+  newSess: ['새 세션', 'New session', '新しいセッション', '新会话'], folder: ['작업 폴더', 'Work folder', '作業フォルダ', '工作文件夹'],
+  sessName: ['이름 (선택)', 'Name (optional)', '名前（任意）', '名称（可选）'], loading: ['불러오는 중…', 'Loading…', '読み込み中…', '加载中…'],
+  starting: ['PC에서 켜는 중이에요', 'Starting on the PC', 'PCで起動中です', '正在电脑上启动'],
+  notif: ['알림', 'Notifications', '通知', '通知'],
+  notifSub: ['세션이 확인을 기다리거나 회의 보고서가 오면 알려 줘요.', 'Get notified when a session needs input or a report arrives.', 'セッションが確認を待つときや報告書が届いたときに通知します。', '会话等待确认或收到汇报时通知你。'],
+  notifOn: ['알림 켜기', 'Turn on', '通知をオン', '开启通知'], notifOff: ['알림 끄기', 'Turn off', '通知をオフ', '关闭通知'], notifTest: ['시험 알림', 'Test', 'テスト通知', '测试通知'],
+  notifIos: ['아이폰은 Safari 공유 > "홈 화면에 추가"로 설치한 뒤 거기서 열어야 알림을 받을 수 있어요.', 'On iPhone, add this app to the Home Screen (Safari Share > Add to Home Screen) and open it from there to get notifications.', 'iPhoneではSafariの共有 >「ホーム画面に追加」で追加し、そこから開くと通知を受け取れます。', '在 iPhone 上，请通过 Safari 分享 >“添加到主屏幕”安装，并从主屏幕打开才能接收通知。'],
+  notifDenied: ['이 브라우저에서 알림이 막혀 있어요', 'Notifications are blocked in this browser', 'このブラウザで通知がブロックされています', '此浏览器已阻止通知'],
+  conn: ['연결', 'Connection', '接続', '连接'], pcAddr: ['PC 주소', 'PC address', 'PCのアドレス', '电脑地址'],
+  forget: ['이 기기 연결 해제', 'Forget this PC', 'この端末の接続を解除', '解除此设备的连接'],
+  forgetQ: ['이 휴대폰에서 연결 정보를 지울까요? 다시 쓰려면 QR로 새로 연결해야 해요.', 'Remove the connection from this phone? You will need to scan a new QR.', 'このスマホから接続情報を削除しますか？再び使うには新しいQRで接続します。', '要从此手机删除连接信息吗？之后需要重新扫码连接。'],
+  install: ['홈 화면에 추가하면 앱처럼 쓸 수 있어요.', 'Add to your Home Screen to use it like an app.', 'ホーム画面に追加するとアプリのように使えます。', '添加到主屏幕即可像应用一样使用。'],
+  err: ['오류: {0}', 'Error: {0}', 'エラー: {0}', '错误：{0}'], offSession: ['세션이 꺼져 있어요', 'The session is off', 'セッションがオフです', '会话已关闭'],
+  ago: ['{0}분 전', '{0}m ago', '{0}分前', '{0} 分钟前'], now: ['방금', 'now', 'たった今', '刚刚'],
+  today: ['오늘 {0} 토큰', '{0} tokens today', '今日 {0} トークン', '今日 {0} token'],
+  presentAgain: ['다시 듣기', 'Replay', 'もう一度', '重听'],
+};
+let LANG = (localStorage.getItem('co.lang') || navigator.language || 'ko').slice(0, 2);
+const LI = () => ({ ko: 0, en: 1, ja: 2, zh: 3 })[LANG] ?? 1;
+function t(key, ...a) {
+  let v = key.split('.').reduce((o, k) => o && o[k], STR);
+  let s = Array.isArray(v) ? v[LI()] : key;
+  a.forEach((x, i) => { s = s.replace('{' + i + '}', x); });
+  return s;
+}
+
+// ───────────── 작은 도구 ─────────────
+const $ = (s, el = document) => el.querySelector(s);
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k === 'text') el.textContent = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'style') el.style.cssText = v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return el;
+}
+function toast(text, warn) {
+  const el = $('#toast');
+  el.textContent = text;
+  el.className = warn ? 'warn' : '';
+  el.hidden = false;
+  el.style.animation = 'none'; void el.offsetWidth; el.style.animation = '';
+  clearTimeout(toast.t);
+  toast.t = setTimeout(() => { el.hidden = true; }, 2600);
+}
+function ago(ts) {
+  const m = Math.floor((Date.now() / 1000 - ts) / 60);
+  return m < 1 ? t('now') : m < 120 ? t('ago', m) : new Date(ts * 1000).toLocaleString(LANG, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function fmtN(v) { return v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(1) + 'K' : String(v || 0); }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ───────────── 연결 정보 ─────────────
+let conf = JSON.parse(localStorage.getItem('co.conf') || 'null') || {};
+(function takePairing() {  // QR 링크: #k=열쇠&t=채널&u=주소
+  if (!location.hash) return;
+  const p = new URLSearchParams(location.hash.slice(1));
+  if (p.get('k') && p.get('t')) {
+    conf = { k: p.get('k'), t: p.get('t'), u: p.get('u') || '' };
+    saveConf();
+  }
+  history.replaceState(null, '', location.pathname + location.search);  // 열쇠를 주소 표시줄·기록에 남기지 않는다
+})();
+function saveConf() {
+  localStorage.setItem('co.conf', JSON.stringify(conf));
+  idbPut('conf', conf).catch(() => {});  // 서비스 워커(알림)가 읽는다
+}
+function idb() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('claude-office', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbPut(k, v) {
+  const db = await idb();
+  return new Promise((res, rej) => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(v, k); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+}
+
+// ───────────── PC와 통신 ─────────────
+let online = false, revoked = false, pcOff = false;
+async function api(path, body, { timeout = 12000, raw = false } = {}) {
+  if (!conf.u) throw new Error('no address');
+  const ctl = new AbortController();
+  const tm = setTimeout(() => ctl.abort(), timeout);
+  try {
+    const r = await fetch(conf.u + path, {
+      method: body ? 'POST' : 'GET', signal: ctl.signal, cache: 'no-store', referrerPolicy: 'no-referrer',
+      headers: Object.assign({ Authorization: 'Bearer ' + conf.k }, body ? { 'Content-Type': 'application/json' } : {}),
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (r.status === 401) { revoked = true; throw new Error('unauthorized'); }
+    if (!r.ok) {
+      let msg = r.status;
+      try { msg = (await r.json()).error || msg; } catch (e) { /* 무시 */ }
+      throw new Error(String(msg));
+    }
+    return raw ? r.blob() : r.json();
+  } finally { clearTimeout(tm); }
+}
+async function ping(u) {
+  try {
+    const ctl = new AbortController();
+    setTimeout(() => ctl.abort(), 6000);
+    const r = await fetch(u + '/api/ping', { signal: ctl.signal, cache: 'no-store' });
+    return r.ok && (await r.json()).app === 'claude-office';
+  } catch (e) { return false; }
+}
+async function findPC() {
+  // 저장된 주소 → 안 되면 ntfy의 비밀 채널에서 PC가 마지막으로 알린 주소
+  if (conf.u && await ping(conf.u)) return true;
+  try {
+    const r = await fetch('https://ntfy.sh/' + encodeURIComponent(conf.t) + '/json?poll=1&since=12h', { cache: 'no-store' });
+    const lines = (await r.text()).trim().split('\n').filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const m = JSON.parse(lines[i]);
+      if (m.event !== 'message') continue;
+      const d = JSON.parse(m.message || '{}');
+      if (!d.u) { pcOff = true; return false; }
+      if (/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(d.u) && await ping(d.u)) {
+        conf.u = d.u; saveConf(); pcOff = false; return true;
+      }
+      break;
+    }
+  } catch (e) { /* 아래에서 다시 */ }
+  pcOff = true;
+  return false;
+}
+
+let state = null, stateSig = '';
+async function connect() {
+  setConn('connecting');
+  if (!conf.k) { render(); return; }
+  for (let wait = 2000; ; wait = Math.min(wait * 1.6, 20000)) {
+    if (await findPC()) break;
+    setConn('off');
+    render();
+    await sleep(wait);
+  }
+  try {
+    const hi = await api('/api/hello', { name: deviceName() });
+    if (!localStorage.getItem('co.lang') && hi.lang) LANG = hi.lang;
+    conf.vapid = hi.vapid; saveConf();
+  } catch (e) { if (revoked) { setConn('off'); render(); return; } }
+  online = true;
+  setConn('on');
+  buildTabs();
+  poll();
+}
+function deviceName() {
+  const ua = navigator.userAgent;
+  const m = ua.match(/\(([^)]+)\)/);
+  const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? (m && m[1].split(';').map(s => s.trim()).find(s => /^[A-Z]{2}-|SM-|Pixel|Galaxy/.test(s))) || 'Android' : 'Browser';
+  const br = /SamsungBrowser/.test(ua) ? 'Samsung' : /CriOS|Chrome/.test(ua) ? 'Chrome' : /Safari/.test(ua) ? 'Safari' : /Firefox/.test(ua) ? 'Firefox' : '';
+  return (os + ' ' + br).trim();
+}
+function setConn(s) {
+  const d = $('#conn-dot');
+  d.className = 'dot' + (s === 'on' ? ' on' : s === 'off' ? ' off' : '');
+  $('#conn-text').textContent = s === 'on' ? t('connected') : s === 'off' ? '' : t('connecting');
+}
+let pollTimer;
+async function poll() {
+  clearTimeout(pollTimer);
+  if (document.hidden) { pollTimer = setTimeout(poll, 4000); return; }
+  try {
+    const s = await api('/api/state');
+    online = true; setConn('on');
+    const sig = JSON.stringify(s, (k, v) => (k === 'now' ? 0 : v));
+    if (sig !== stateSig) { stateSig = sig; state = s; render(true); }
+    if (tab === 'talk') refreshChat();
+  } catch (e) {
+    if (revoked) { online = false; setConn('off'); render(); return; }
+    online = false;
+    setConn('connecting');
+    if (!(await ping(conf.u))) { connect(); return; }
+  }
+  pollTimer = setTimeout(poll, 3000);
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden && online) poll(); });
+
+// ───────────── NPC 그림 ─────────────
+const sprites = new Map();
+function sprite(sid, pose, img) {
+  const key = sid + '/' + pose;
+  img.alt = '';
+  if (sprites.has(key)) {
+    const v = sprites.get(key);
+    if (typeof v === 'string') img.src = v; else v.then(u => { img.src = u; });
+    return img;
+  }
+  const p = api('/api/sprite?sid=' + encodeURIComponent(sid) + '&pose=' + pose + '&s=4', null, { raw: true })
+    .then(b => { const u = URL.createObjectURL(b); sprites.set(key, u); return u; })
+    .catch(() => { sprites.delete(key); return ''; });
+  sprites.set(key, p);
+  p.then(u => { if (u) img.src = u; });
+  return img;
+}
+function poseOf(mode) { return mode === 'busy' ? 'type_a' : mode === 'wait' ? 'raise' : mode === 'sleep' ? 'sleep' : 'idle'; }
+setInterval(() => {  // 작업 중인 세션은 타자 치는 두 그림을 번갈아
+  document.querySelectorAll('img[data-busy]').forEach(img => {
+    const b = img.dataset.flip === '1';
+    img.dataset.flip = b ? '0' : '1';
+    sprite(img.dataset.busy, b ? 'type_a' : 'type_b', img);
+  });
+}, 420);
+function avatar(sid, mode, cls) {
+  const img = h('img', { class: 'avatar' + (cls ? ' ' + cls : '') });
+  if (mode === 'busy') img.dataset.busy = sid;
+  return sprite(sid, poseOf(mode), img);
+}
+const imgs = new Map();
+function meetImg(mid, name, img) {
+  const key = mid + '/' + name;
+  const set = u => { if (u) img.src = u; };
+  if (imgs.has(key)) { Promise.resolve(imgs.get(key)).then(set); return img; }
+  const p = api('/api/img?m=' + encodeURIComponent(mid) + '&f=' + encodeURIComponent(name), null, { raw: true, timeout: 30000 })
+    .then(b => URL.createObjectURL(b)).catch(() => '');
+  imgs.set(key, p);
+  p.then(u => { imgs.set(key, u); set(u); });
+  return img;
+}
+
+// ───────────── 탭 ─────────────
+const ICONS = {
+  office: '<path d="M3 11 12 4l9 7v9H3z" fill="currentColor"/><rect x="10" y="14" width="4" height="6" fill="var(--card)"/>',
+  talk: '<path d="M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9l-5 4v-4H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z" fill="currentColor"/><circle cx="8" cy="11" r="1.4" fill="var(--card)"/><circle cx="12" cy="11" r="1.4" fill="var(--card)"/><circle cx="16" cy="11" r="1.4" fill="var(--card)"/>',
+  sec: '<path d="m12 3 2.6 5.6 6 .7-4.5 4.1 1.2 6L12 16.4 6.7 19.4l1.2-6L3.4 9.3l6-.7z" fill="currentColor"/>',
+  meet: '<circle cx="6" cy="7" r="2" fill="currentColor"/><circle cx="12" cy="5" r="2" fill="currentColor"/><circle cx="18" cy="7" r="2" fill="currentColor"/><rect x="2" y="11" width="20" height="4" rx="1.5" fill="currentColor"/><path d="M6 15v5M18 15v5" stroke="currentColor" stroke-width="2"/>',
+  more: '<circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/>',
+};
+const TABS = ['office', 'talk', 'sec', 'meet', 'more'];
+let tab = localStorage.getItem('co.tab') || 'office';
+function buildTabs() {
+  const nav = $('#tabs');
+  nav.textContent = '';
+  if (!online) return;
+  nav.append(h('i', { class: 'ink' }));
+  for (const k of TABS) {
+    const b = h('button', { 'data-k': k, onclick: () => go(k) });
+    b.innerHTML = '<svg viewBox="0 0 24 24">' + ICONS[k] + '</svg>';  // 고정 아이콘만 (PC 데이터 아님)
+    b.append(h('span', { text: t(k) }));
+    nav.append(b);
+  }
+  markTab();
+}
+function markTab() {
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.k === tab));
+  const on = $('#tabs button.on'), ink = $('#tabs .ink');
+  if (on && ink) { ink.style.left = on.offsetLeft + on.offsetWidth * 0.3 + 'px'; ink.style.width = on.offsetWidth * 0.4 + 'px'; }
+  const n = state ? state.sessions.filter(s => s.mode === 'wait').length : 0;
+  badge('office', n);
+  badge('sec', state ? state.sec.items.filter(i => !i.done).length : 0);
+}
+function badge(k, n) {
+  const b = $(`#tabs button[data-k="${k}"]`);
+  if (!b) return;
+  let el = b.querySelector('.badge');
+  if (!n) { if (el) el.remove(); return; }
+  if (!el) { el = h('span', { class: 'badge' }); b.append(el); }
+  el.textContent = n;
+}
+function go(k) {
+  if (tab === k) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+  tab = k;
+  localStorage.setItem('co.tab', k);
+  markTab();
+  render();
+  window.scrollTo(0, 0);
+  if (k === 'talk') refreshChat(true);
+  if (k === 'more') loadPast();
+}
+window.addEventListener('resize', markTab);
+
+// ───────────── 그리기 ─────────────
+function render(quiet) {
+  const v = $('#view');
+  const keepY = window.scrollY;
+  v.textContent = '';
+  v.className = quiet ? '' : 'view-in';
+  if (!conf.k) return v.append(hero('🔗', t('notPaired'), t('notPairedSub')));
+  if (revoked) return v.append(hero('⛔', t('revoked'), t('notPairedSub')));
+  if (!online || !state) {
+    return v.append(pcOff ? hero('💤', t('pcOff'), t('pcOffSub')) : h('div', { class: 'hero' }, h('div', { class: 'spin' }), h('p', { class: 'text2', text: t('connecting') })));
+  }
+  if (quiet) v.classList.add('still');
+  ({ office: viewOffice, talk: viewTalk, sec: viewSec, meet: viewMeet, more: viewMore })[tab](v);
+  if (quiet) { v.querySelectorAll('.card').forEach(c => { c.style.animation = 'none'; }); window.scrollTo(0, keepY); }
+  markTab();
+  if (sheetFor) refreshSheet();
+}
+function hero(icon, title, sub) {
+  return h('div', { class: 'hero' }, h('div', { class: 'big', text: icon }), h('h2', { text: title }), h('p', { class: 'text2', text: sub }));
+}
+function chip(mode) { return h('span', { class: 'chip m-' + mode, text: t(mode) }); }
+
+function viewOffice(v) {
+  const ss = state.sessions;
+  const counts = ['busy', 'wait', 'idle', 'sleep'].map(m => [m, ss.filter(s => s.mode === m).length]);
+  v.append(h('div', { class: 'row', style: 'gap:6px;flex-wrap:wrap;margin:0 2px 12px' }, counts.map(([m, n]) => h('span', { class: 'chip m-' + m, text: t(m) + ' ' + n }))));
+  if (!ss.length) return v.append(h('div', { class: 'empty' }, h('b', { text: t('noSessions') })));
+  const order = { wait: 0, busy: 1, idle: 2, sleep: 3 };
+  [...ss].sort((a, b) => order[a.mode] - order[b.mode]).forEach((s, i) => {
+    const card = h('div', { class: 'card tap', style: `animation-delay:${i * 40}ms`, onclick: () => openSession(s.sid) },
+      h('div', { class: 'row' }, avatar(s.sid, s.mode),
+        h('div', { class: 'grow' },
+          h('div', { class: 'row', style: 'gap:8px' }, h('div', { class: 'name grow', text: s.name }), chip(s.mode)),
+          h('div', { class: 'small ell', text: s.tool || s.cwd }),
+          s.goal ? h('div', { class: 'text2 ell', style: 'font-size:13px', text: s.goal }) : null,
+          s.progress != null ? h('div', { class: 'bar' }, h('i', { style: `width:${Math.round(s.progress)}%` })) : null)),
+      s.mode === 'wait' ? h('div', { class: 'wait-note', text: '⏳ ' + t('waitNote') + (s.waiting ? ' · ' + s.waiting : '') }) : null);
+    v.append(card);
+  });
+}
+
+// ───────────── 시트 (세션 상세) ─────────────
+let sheetFor = null, sheetTab = 'qa', sheetData = null;
+function openSheet(build) {
+  const sh = $('#sheet'), back = $('#sheet-back');
+  sh.textContent = '';
+  sh.className = '';
+  sh.append(h('div', { class: 'grip' }));
+  build(sh);
+  sh.hidden = false; back.hidden = false;
+  back.onclick = closeSheet;
+  document.body.style.overflow = 'hidden';
+}
+function closeSheet() {
+  const sh = $('#sheet');
+  sh.classList.add('out');
+  setTimeout(() => { sh.hidden = true; $('#sheet-back').hidden = true; document.body.style.overflow = ''; }, 200);
+  sheetFor = null;
+}
+let touchY = null;
+$('#sheet').addEventListener('touchstart', e => { touchY = $('#sheet').scrollTop <= 0 ? e.touches[0].clientY : null; }, { passive: true });
+$('#sheet').addEventListener('touchend', e => { if (touchY != null && e.changedTouches[0].clientY - touchY > 90) closeSheet(); touchY = null; });
+
+function openSession(sid) {
+  sheetFor = sid;
+  openSheet(sh => {
+    sh.append(h('div', { id: 'sess-head' }), segBar(['qa', 'log', 'tasks'], sheetTab, k => { sheetTab = k; fillSession(); }), h('div', { id: 'sess-body' }),
+      composer(t('cmdPh'), async text => {
+        await api('/api/send', { sid, text });
+        toast(t('sent'));
+        setTimeout(loadSession, 1500);
+      }));
+    refreshSheet();
+    loadSession();
+  });
+}
+function segBar(keys, on, pick) {
+  const seg = h('div', { class: 'seg' }, h('i', { class: 'knob' }));
+  keys.forEach(k => seg.append(h('button', { 'data-k': k, class: k === on ? 'on' : '', text: t(k), onclick: e => { seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === e.currentTarget)); moveKnob(seg); pick(k); } })));
+  requestAnimationFrame(() => moveKnob(seg));
+  return seg;
+}
+function moveKnob(seg) {
+  const b = seg.querySelector('button.on'), k = seg.querySelector('.knob');
+  if (b && k) { k.style.left = b.offsetLeft + 'px'; k.style.width = b.offsetWidth + 'px'; }
+}
+function composer(ph, onSend) {
+  const ta = h('textarea', { rows: 1, placeholder: ph, enterkeyhint: 'send' });
+  ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = Math.min(140, ta.scrollHeight) + 'px'; });
+  const btn = h('button', { class: 'btn pri', text: t('send') });
+  btn.onclick = async () => {
+    const text = ta.value.trim();
+    if (!text) return;
+    btn.disabled = true;
+    try { await onSend(text); ta.value = ''; ta.style.height = ''; } catch (e) { toast(t('err', e.message === 'session is off' ? t('offSession') : e.message), true); }
+    btn.disabled = false;
+  };
+  return h('div', { class: 'composer' }, ta, btn);
+}
+function refreshSheet() {
+  const s = state && state.sessions.find(x => x.sid === sheetFor);
+  const head = $('#sess-head');
+  if (!head) return;
+  head.textContent = '';
+  if (!s) { head.append(h('div', { class: 'empty', text: t('offSession') })); return; }
+  head.append(h('div', { class: 'row' }, avatar(s.sid, s.mode),
+    h('div', { class: 'grow' }, h('div', { class: 'name', text: s.name }), h('div', { class: 'row', style: 'gap:6px' }, chip(s.mode), h('span', { class: 'small', text: s.model || '' })),
+      h('div', { class: 'small ell', text: s.cwd }), h('div', { class: 'small', text: t('today', fmtN(s.tok)) }))),
+  s.mode === 'wait' ? h('div', { class: 'wait-note', text: '⏳ ' + t('waitNote') + (s.tool ? ' · ' + s.tool : '') }) : null);
+}
+async function loadSession() {
+  if (!sheetFor) return;
+  try { sheetData = await api('/api/session?sid=' + encodeURIComponent(sheetFor)); } catch (e) { sheetData = null; }
+  fillSession();
+}
+function fillSession() {
+  const body = $('#sess-body');
+  if (!body) return;
+  body.textContent = '';
+  const s = state && state.sessions.find(x => x.sid === sheetFor);
+  if (sheetTab === 'tasks') {
+    if (!s || !s.tasks.length) return body.append(h('div', { class: 'empty', text: t('noQa') }));
+    if (s.goal) body.append(h('div', { class: 'text2', style: 'margin:4px 2px 8px', text: s.goal }));
+    s.tasks.forEach(k => body.append(h('div', { class: 'log' }, h('span', { class: 't', text: k.s === 'completed' ? '✔' : k.s === 'in_progress' ? '▶' : '·' }), k.t, k.p != null && k.s === 'in_progress' ? ` (${k.p}%)` : '')));
+    return;
+  }
+  if (!sheetData) return body.append(h('div', { class: 'empty' }, h('div', { class: 'spin' })));
+  if (sheetTab === 'qa') {
+    if (!sheetData.qa.length) return body.append(h('div', { class: 'empty', text: t('noQa') }));
+    [...sheetData.qa].reverse().forEach(e => body.append(h('div', { class: 'qa' }, h('div', { class: 'small', text: ago(e.qt) }), h('div', { class: 'q', text: e.q }), e.a ? h('div', { class: 'a', text: e.a }) : null)));
+  } else {
+    const icon = { user: '▶', say: '“', tool: '⚙', err: '⚠', msg: '✉' };
+    [...sheetData.events].reverse().forEach(e => body.append(h('div', { class: 'log' }, h('span', { class: 't', text: new Date(e.ts * 1000).toTimeString().slice(0, 5) }), (icon[e.k] || '·') + ' ' + e.t)));
+  }
+}
+
+// ───────────── 세션톡 ─────────────
+let room = localStorage.getItem('co.room') || '*', chatData = null, chatSig = '';
+function viewTalk(v) {
+  const rooms = h('div', { class: 'rooms' });
+  rooms.append(h('button', { class: 'room' + (room === '*' ? ' on' : ''), onclick: () => setRoom('*') }, h('div', { class: 'all', text: '#' }), h('span', { text: t('all') })));
+  state.sessions.forEach(s => {
+    const img = h('img');
+    sprite(s.sid, poseOf(s.mode), img);
+    rooms.append(h('button', { class: 'room' + (room === s.sid ? ' on' : ''), onclick: () => setRoom(s.sid) }, img, h('span', { text: s.name })));
+  });
+  v.append(rooms, h('div', { class: 'chat', id: 'chat' }));
+  if (room !== '*' && state.sessions.some(s => s.sid === room)) {
+    v.append(composer(t('talkPh'), async text => { await api('/api/send', { sid: room, text }); toast(t('sent')); refreshChat(true); }));
+  } else {
+    v.append(h('div', { class: 'small', style: 'text-align:center;padding:10px', text: t('pickRoom') }));
+  }
+  drawChat();
+}
+function setRoom(r) { room = r; localStorage.setItem('co.room', r); chatData = null; render(); refreshChat(true); }
+async function refreshChat(force) {
+  try {
+    const d = await api('/api/chat?room=' + encodeURIComponent(room));
+    const sig = JSON.stringify(d);
+    if (sig === chatSig && !force) return;
+    chatSig = sig; chatData = d;
+    drawChat(true);
+  } catch (e) { /* 다음 폴링 때 */ }
+}
+function drawChat(scroll) {
+  const box = $('#chat');
+  if (!box) return;
+  box.textContent = '';
+  if (!chatData) { box.append(h('div', { class: 'empty' }, h('div', { class: 'spin' }))); return; }
+  if (!chatData.msgs.length) box.append(h('div', { class: 'empty', text: t('noQa') }));
+  chatData.msgs.forEach(m => {
+    const me = m.from === 'user';
+    box.append(h('div', { class: 'msg ' + (me ? 'me' : 'other') },
+      me ? null : h('div', { class: 'who', text: (m.fromLabel || '') + (room === '*' && m.toLabel ? ' → ' + m.toLabel : '') }),
+      h('div', { class: 'b', text: m.text }),
+      h('div', { class: 'meta', text: (me && m.read ? t('read') + ' · ' : '') + ago(m.ts) })));
+  });
+  if (chatData.typing.length && (room === '*' || chatData.typing.includes(room))) box.append(h('div', { class: 'typing' }, h('i'), h('i'), h('i')));
+  if (scroll) window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+}
+
+// ───────────── 비서 ─────────────
+let showDone = false;
+function viewSec(v) {
+  const sec = state.sec;
+  const head = h('div', { class: 'card sec-head' },
+    h('div', { class: 'row' }, h('div', { class: 'grow' }, h('div', { class: 'name', text: t('sec') }),
+      h('div', { class: 'small', text: sec.updated ? ago(sec.updated / 1000) : '' })),
+    h('button', { class: 'btn', style: 'background:#fff;color:#1d8f66;border:0', disabled: !sec.sid || sec.briefing, text: sec.briefing ? t('briefing') : t('brief'),
+      onclick: async e => { e.currentTarget.disabled = true; try { await api('/api/brief', {}); toast(t('briefing')); poll(); } catch (er) { toast(t('err', er.message), true); } } })),
+    h('div', { style: 'margin-top:8px;font-size:14px', text: sec.sid ? (sec.summary || '') : t('noSec') }));
+  v.append(head);
+  const items = sec.items.filter(i => showDone || !i.done);
+  v.append(h('label', { class: 'small', style: 'display:block;margin:0 4px 10px' },
+    h('input', { type: 'checkbox', style: 'width:auto;margin-right:6px', checked: showDone, onchange: e => { showDone = e.target.checked; render(); } }), t('showDone')));
+  if (!items.length) return v.append(h('div', { class: 'empty', text: t('noSugg') }));
+  items.forEach((it, i) => {
+    const btns = h('div', { class: 'btns' });
+    it.choices.forEach((ch, j) => btns.append(h('button', { class: 'btn ' + (j ? 'line' : 'pri'), disabled: !ch.on, text: ch.label,
+      onclick: async e => { e.currentTarget.disabled = true; try { await api('/api/choice', { key: it.key, i: ch.i }); toast(t('sent')); poll(); } catch (er) { toast(t('err', er.message), true); } } })));
+    if (it.url) btns.append(h('a', { class: 'btn', href: it.url, target: '_blank', rel: 'noopener noreferrer', style: 'text-decoration:none', text: t('link') }));
+    btns.append(h('button', { class: 'btn', style: 'margin-left:auto', text: it.done ? t('undo') : t('markDone'),
+      onclick: async () => { await api('/api/secmark', { key: it.key, done: !it.done }).catch(() => {}); poll(); } }));
+    v.append(h('div', { class: 'card' + (it.done ? ' done' : ''), style: `animation-delay:${i * 50}ms` },
+      h('div', {}, h('span', { class: 'kind k-' + it.kind, text: t('kinds.' + it.kind) }), h('b', { text: it.title })),
+      it.target ? h('div', { class: 'small', text: '→ ' + it.target }) : null,
+      it.detail ? h('details', {}, h('summary', { text: '…' }), h('div', { class: 'text2', style: 'white-space:pre-wrap;font-size:14px', text: it.detail })) : null,
+      btns));
+  });
+}
+
+// ───────────── 회의실 ─────────────
+let meetPick = new Set(JSON.parse(localStorage.getItem('co.meetPick') || '[]')), meetTurns = 3;
+let talk = { sid: null, pages: [], pi: 0, n: 0, timer: null, text: '' };
+const ST = { done: ['stDone', '#2fb985'], partial: ['stPartial', '#f0a020'], todo: ['stTodo', '#e8505b'] };
+function viewMeet(v) {
+  const m = state.meeting;
+  v.append(stage(m), dialog(m));
+  if (!m) {
+    const pick = h('div', { class: 'pick' });
+    state.sessions.forEach(s => {
+      const img = h('img');
+      sprite(s.sid, 'idle', img);
+      pick.append(h('button', { class: meetPick.has(s.sid) ? 'on' : '', onclick: e => {
+        meetPick.has(s.sid) ? meetPick.delete(s.sid) : meetPick.add(s.sid);
+        localStorage.setItem('co.meetPick', JSON.stringify([...meetPick]));
+        e.currentTarget.classList.toggle('on');
+        drawStage(null);
+      } }, img, h('span', { class: 'ell', text: s.name })));
+    });
+    const turns = h('div', { class: 'chips' });
+    [1, 3, 5, 10].forEach(n => turns.append(h('button', { class: n === meetTurns ? 'on' : '', text: n === 1 ? t('turn1') : t('turnN', n), onclick: e => {
+      meetTurns = n; turns.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === e.currentTarget));
+    } })));
+    v.append(h('div', { class: 'card' }, h('b', { text: t('invite') }), h('div', { style: 'margin-top:8px' }, pick),
+      h('div', { style: 'margin:12px 0 6px' }, h('b', { text: t('range') })), turns,
+      h('button', { class: 'btn pri block', style: 'margin-top:14px', text: t('start'), onclick: async e => {
+        const sids = [...meetPick].filter(x => state.sessions.some(s => s.sid === x));
+        if (!sids.length) return toast(t('invite'), true);
+        e.currentTarget.disabled = true;
+        try { await api('/api/meeting/start', { sids, turns: meetTurns }); toast(t('sent')); poll(); } catch (er) { toast(t('err', er.message), true); e.currentTarget.disabled = false; }
+      } })));
+    return;
+  }
+  m.roster.filter(r => r.report).forEach((r, i) => {
+    const rep = r.report;
+    const card = h('div', { class: 'card', style: `animation-delay:${i * 50}ms` },
+      h('div', { class: 'row' }, avatar(r.sid, 'idle', 's'), h('div', { class: 'grow' }, h('div', { class: 'name', text: r.name }), h('div', { style: 'color:var(--acc-text);font-weight:700', text: rep.title })),
+        h('button', { class: 'btn line', text: t('presentAgain'), onclick: () => { present(r.sid); window.scrollTo({ top: 0, behavior: 'smooth' }); } })),
+      rep.summary ? h('div', { class: 'text2', style: 'margin-top:8px;font-size:14px;white-space:pre-wrap', text: rep.summary }) : null);
+    rep.items.forEach(it => {
+      const st = ST[it.status] || ST.done;
+      card.append(h('div', { style: 'border-top:1px solid var(--edge);margin-top:10px;padding-top:8px' },
+        h('div', {}, h('span', { class: 'st', style: 'background:' + st[1], text: t(st[0]) }), h('b', { text: it.request })),
+        it.result ? h('div', { class: 'text2', style: 'font-size:14px;white-space:pre-wrap;margin-top:4px', text: it.result }) : null,
+        it.images.length ? h('div', { class: 'thumbs' }, it.images.map(n => meetImg(m.id, n, h('img', { alt: '' })))) : null));
+    });
+    if (rep.next) card.append(h('div', { class: 'small', style: 'margin-top:8px', text: t('next') + rep.next }));
+    v.append(card);
+  });
+  v.append(h('button', { class: 'btn block', style: 'margin-top:6px', text: t('end'), onclick: async () => {
+    if (!confirm(t('endQ'))) return;
+    await api('/api/meeting/end', {}).catch(() => {});
+    talk.sid = null; poll();
+  } }));
+  autoPresent(m);
+}
+function seatState(r, m) {
+  if (!m) return 'guest';
+  if (r.report) return r.sid === talk.sid ? 'talk' : (m.presented || []).includes(r.sid) ? 'done' : 'ready';
+  return r.mode == null ? 'off' : r.mode === 'busy' ? 'busy' : 'wait';
+}
+const BADGE = { busy: ['…', '#5b9ee8'], wait: ['?', '#f0a020'], ready: ['!', '#2fb985'], done: ['✓', '#8a96a3'], off: ['z', '#9a86c8'] };
+function stage(m) { const st = h('div', { class: 'stage', id: 'stage' }); drawStage(m, st); return st; }
+function drawStage(m, st = $('#stage')) {
+  if (!st) return;
+  const prev = new Set([...st.querySelectorAll('.seat')].map(x => x.dataset.sid));
+  st.textContent = '';
+  const page = talk.pages[talk.pi];
+  const scr = h('div', { class: 'screen' });
+  if (page && page.images && page.images.length && m) scr.append(meetImg(m.id, page.images[0], h('img', { alt: '' })));
+  else scr.textContent = talk.sid && m ? ((m.roster.find(r => r.sid === talk.sid) || {}).report || {}).title || '' : t('meet');
+  const roster = m ? m.roster : state.sessions.filter(s => meetPick.has(s.sid)).map(s => ({ sid: s.sid, name: s.name, mode: s.mode }));
+  const seats = h('div', { class: 'seats' });
+  roster.forEach(r => {
+    const s = seatState(r, m);
+    const img = h('img', { alt: '' });
+    sprite(r.sid, s === 'off' ? 'sleep' : s === 'busy' ? 'type_a' : s === 'ready' ? 'raise' : 'idle', img);
+    if (s === 'busy') img.dataset.busy = r.sid;
+    if (prev.has(r.sid)) img.style.animation = s === 'talk' ? '' : 'none';
+    const b = BADGE[s];
+    seats.append(h('div', { class: 'seat ' + s, 'data-sid': r.sid, onclick: () => r.report && present(r.sid) }, img,
+      b ? h('span', { class: 'badge', style: 'background:' + b[1], text: b[0] }) : null));
+  });
+  st.append(scr, seats, h('div', { class: 'table' }));
+}
+function dialog(m) {
+  const box = h('div', { class: 'dialog', id: 'dialog', onclick: () => advance() });
+  box.append(h('span', { class: 'tag sys', id: 'dlg-tag' }), h('div', { class: 'txt', id: 'dlg-txt' }), h('div', { class: 'nav' }, h('span', { id: 'dlg-pg' }), h('span', { class: 'more', id: 'dlg-more', hidden: true, text: '▼' })));
+  requestAnimationFrame(() => { if (!talk.sid) sysLine(m); else showPage(true); });
+  return box;
+}
+function sysLine(m) {
+  const got = m ? m.roster.filter(r => r.report).length : 0;
+  const text = !m ? t('mWelcome') : got && m.roster.every(r => r.report && (m.presented || []).includes(r.sid)) ? t('mDone') : t('mWaiting', got, m.roster.length);
+  if (talk.sid === null && talk.text === text && $('#dlg-txt') && $('#dlg-txt').textContent === text) return;
+  talk.pages = [{ text, images: [] }]; talk.pi = 0;
+  $('#dlg-tag').textContent = t('moderator'); $('#dlg-tag').className = 'tag sys';
+  typeOut(text);
+}
+function pagesOf(rep) {
+  const segs = [];
+  const head = [rep.title, rep.summary].filter(Boolean).join('\n');
+  if (head) segs.push([head, []]);
+  rep.items.forEach(it => segs.push([`[${t((ST[it.status] || ST.done)[0])}] ${it.request}` + (it.result ? '\n' + it.result : ''), it.images]));
+  if (rep.next) segs.push([t('next') + rep.next, []]);
+  const pages = [];
+  for (const [text, images] of segs) {  // 대사 창 한 번에 약 120자
+    const parts = text.match(/[\s\S]{1,120}(?=\s|$)|[\s\S]{1,120}/g) || [text];
+    parts.forEach(p => pages.push({ text: p.trim(), images }));
+  }
+  return pages;
+}
+function present(sid) {
+  const m = state.meeting;
+  const r = m && m.roster.find(x => x.sid === sid);
+  if (!r || !r.report) return;
+  talk.sid = sid; talk.pages = pagesOf(r.report); talk.pi = 0;
+  drawStage(m);
+  showPage();
+}
+function showPage(noType) {
+  const m = state.meeting;
+  const r = m && m.roster.find(x => x.sid === talk.sid);
+  if (!r) { talk.sid = null; return sysLine(m); }
+  $('#dlg-tag').textContent = r.name; $('#dlg-tag').className = 'tag';
+  $('#dlg-pg').textContent = talk.pages.length > 1 ? `${talk.pi + 1}/${talk.pages.length}` : '';
+  drawStage(m);
+  if (noType && talk.text === talk.pages[talk.pi].text && talk.n >= talk.text.length) { $('#dlg-txt').textContent = talk.text; $('#dlg-more').hidden = false; return; }
+  typeOut(talk.pages[talk.pi].text);
+}
+function typeOut(text) {
+  clearTimeout(talk.timer);
+  talk.text = text; talk.n = 0;
+  const el = $('#dlg-txt'), more = $('#dlg-more');
+  if (!el) return;
+  more.hidden = true;
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const step = () => {
+    if (!$('#dlg-txt')) return;
+    talk.n = reduce ? text.length : talk.n + 1;
+    el.textContent = text.slice(0, talk.n);
+    if (talk.n >= text.length) { more.hidden = !talk.sid; return; }
+    const ch = text[talk.n - 1];
+    talk.timer = setTimeout(step, '.!?。！？\n'.includes(ch) ? 260 : ',，、'.includes(ch) ? 110 : 28);  // 초당 약 35자, 문장 끝에서 잠깐
+  };
+  step();
+}
+function advance() {
+  if (talk.n < talk.text.length) { clearTimeout(talk.timer); talk.n = talk.text.length; $('#dlg-txt').textContent = talk.text; $('#dlg-more').hidden = !talk.sid; return; }
+  if (!talk.sid) return;
+  if (talk.pi + 1 < talk.pages.length) { talk.pi++; showPage(); return; }
+  const done = talk.sid;
+  talk.sid = null;
+  api('/api/meeting/presented', { sid: done }).catch(() => {}).then(poll);
+  if (state.meeting) { state.meeting.presented = [...(state.meeting.presented || []), done]; autoPresent(state.meeting) || (drawStage(state.meeting), sysLine(state.meeting)); }
+}
+function autoPresent(m) {
+  if (talk.sid) return true;
+  const next = m.roster.find(r => r.report && !(m.presented || []).includes(r.sid));
+  if (next) { setTimeout(() => { if (!talk.sid && tab === 'meet') present(next.sid); }, 500); return true; }
+  return false;
+}
+
+// ───────────── 더보기 ─────────────
+let past = null;
+async function loadPast() {
+  try { past = await api('/api/past'); } catch (e) { past = { past: [], cwds: [] }; }
+  if (tab === 'more') render(true);
+}
+function viewMore(v) {
+  // 세션 켜기
+  const launch = h('div', { class: 'card' }, h('h2', { class: 'title', text: t('launch') }));
+  const sel = h('select', {}, (past ? past.cwds : []).map(c => h('option', { value: c, text: c })));
+  const nm = h('input', { placeholder: t('sessName'), maxlength: 40 });
+  launch.append(h('div', { class: 'small', text: t('newSess') + ' · ' + t('folder') }), sel, h('div', { style: 'height:8px' }), nm,
+    h('button', { class: 'btn pri block', style: 'margin-top:10px', text: t('newSess'), disabled: !(past && past.cwds.length), onclick: async e => {
+      e.currentTarget.disabled = true;
+      try { await api('/api/new', { cwd: sel.value, name: nm.value.trim() }); toast(t('starting')); } catch (er) { toast(t('err', er.message), true); }
+      e.currentTarget.disabled = false;
+    } }));
+  if (!past) launch.append(h('div', { class: 'small', style: 'margin-top:10px', text: t('loading') }));
+  else past.past.slice(0, 20).forEach(p => launch.append(h('div', { class: 'row', style: 'border-top:1px solid var(--edge);margin-top:10px;padding-top:10px' },
+    h('div', { class: 'grow' }, h('div', { class: 'ell', style: 'font-weight:700', text: p.name }), h('div', { class: 'small ell', text: ago(p.mtime) + ' · ' + p.cwd }),
+      p.last ? h('div', { class: 'small ell', text: p.last }) : null),
+    h('button', { class: 'btn line', text: t('resume'), onclick: async e => {
+      e.currentTarget.disabled = true;
+      try { await api('/api/resume', { sid: p.sid }); toast(t('starting')); } catch (er) { toast(t('err', er.message), true); e.currentTarget.disabled = false; }
+    } }))));
+  v.append(launch);
+  // 알림
+  const nCard = h('div', { class: 'card' }, h('h2', { class: 'title', text: t('notif') }), h('div', { class: 'text2', style: 'font-size:14px', text: t('notifSub') }));
+  const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const ios = /iPhone|iPad/.test(navigator.userAgent) && !navigator.standalone;
+  if (!supported || ios) nCard.append(h('div', { class: 'wait-note', text: t('notifIos') }));
+  else if (Notification.permission === 'denied') nCard.append(h('div', { class: 'wait-note', text: t('notifDenied') }));
+  else {
+    const btns = h('div', { class: 'btns' });
+    navigator.serviceWorker.ready.then(reg => reg.pushManager.getSubscription()).then(sub => {
+      btns.append(h('button', { class: 'btn ' + (sub ? '' : 'pri'), text: sub ? t('notifOff') : t('notifOn'), onclick: () => (sub ? pushOff() : pushOn()).then(() => render(true)) }));
+      if (sub) btns.append(h('button', { class: 'btn line', text: t('notifTest'), onclick: () => api('/api/push', { sub: sub.toJSON(), test: true }).catch(e => toast(t('err', e.message), true)) }));
+    });
+    nCard.append(btns);
+  }
+  v.append(nCard);
+  // 연결
+  v.append(h('div', { class: 'card' }, h('h2', { class: 'title', text: t('conn') }),
+    h('div', { class: 'kv' }, h('b', { text: t('pcAddr') }), h('span', { class: 'ell', text: conf.u || '-' })),
+    h('div', { class: 'small', style: 'margin-top:8px', text: t('install') }),
+    h('button', { class: 'btn block', style: 'margin-top:12px', text: t('forget'), onclick: () => {
+      if (!confirm(t('forgetQ'))) return;
+      pushOff().finally(() => { localStorage.removeItem('co.conf'); idbPut('conf', null).catch(() => {}); location.reload(); });
+    } })));
+  v.append(h('div', { class: 'chips', style: 'justify-content:center;margin:6px 0 14px' }, [['ko', '한국어'], ['en', 'English'], ['ja', '日本語'], ['zh', '中文']].map(([c, n]) =>
+    h('button', { class: c === LANG ? 'on' : '', text: n, onclick: () => { LANG = c; localStorage.setItem('co.lang', c); buildTabs(); render(); } }))));
+}
+function urlB64ToBytes(s) {
+  const b = atob((s + '='.repeat((4 - s.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(b, c => c.charCodeAt(0));
+}
+async function pushOn() {
+  try {
+    if (await Notification.requestPermission() !== 'granted') return toast(t('notifDenied'), true);
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToBytes(conf.vapid) });
+    await api('/api/push', { sub: sub.toJSON(), test: true });
+  } catch (e) { toast(t('err', e.message), true); }
+}
+async function pushOff() {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) await sub.unsubscribe();
+    await api('/api/push', { sub: null });
+  } catch (e) { /* 연결이 끊겨 있어도 이 기기에서는 끈다 */ }
+}
+
+// ───────────── 시작 ─────────────
+$('#refresh-btn').onclick = () => { stateSig = ''; online ? poll() : connect(); };
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+if (conf.k) idbPut('conf', conf).catch(() => {});
+render();
+connect();

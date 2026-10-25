@@ -30,6 +30,11 @@ a KakaoTalk-style chat between sessions, and one-click session launch / resume.
   [`assets/capture.ps1`](assets/capture.ps1). Invited sessions sit around a conference table; when a report arrives
   that session raises a hand and presents it line by line in a typed-out dialogue box, with its captures on the
   projector screen. Reports are also kept as cards in the minutes and can be saved as one HTML document. (Sessions may ask permission to write the report file or run the capture script.)
+- **Remote control from your phone** – a phone web app (PWA) shows the office, SessionTalk, the secretary and the
+  meeting room, sends commands, starts/resumes sessions and notifies you when a session needs approval. Turn it on in
+  **Remote**: the PC opens a temporary Cloudflare tunnel outward (no router setup), you pair a phone once by scanning a
+  QR code, and the app finds the PC again through a secret ntfy.sh channel. Each device has its own key; the PC stores
+  only its hash and you can disconnect devices any time. Approving tool permissions still happens in the PC terminal.
 - **Launch session** – start a new session in a folder, or resume a closed one (`claude --resume`) in a new terminal.
 - **Smooth motion** – menus slide, sections fold open, screens glide in, the sidebar highlight follows your choice
   (turn it all off with *Animation* in the menu).
@@ -96,6 +101,10 @@ saved meeting documents (`session-collab/meeting/`).
   보고서로 정리하고 [`assets/capture.ps1`](assets/capture.ps1)로 결과 화면을 캡처해 올려요. 초대한 세션은 회의 탁자에 둘러앉고,
   보고서가 오면 손을 든 뒤 차례로 발표해요. 대사는 타이핑되듯 나오고 캡처는 발표 스크린에 떠요. 보고서는 회의록 카드로도
   남고, HTML 자료 한 장으로 저장할 수 있어요. (보고서 파일 쓰기·캡처 실행에 세션이 권한을 물을 수 있어요.)
+- **휴대폰 원격 조종** – 휴대폰 웹앱(PWA)으로 사무실·세션톡·비서·회의실을 보고 명령을 보내고, 세션을 켜고, 세션이 확인을
+  기다리면 알림을 받아요. **원격** 화면에서 켜면 PC가 Cloudflare 임시 터널을 바깥으로 열고(공유기 설정 없음), 휴대폰은 QR을
+  한 번 찍어 연결해요. 이후엔 ntfy.sh의 비밀 채널로 PC를 다시 찾아요. 기기마다 열쇠가 따로이고 PC에는 해시만 남으며, 언제든
+  연결을 끊을 수 있어요. 도구 권한 승인은 여전히 PC 터미널에서 해요.
 - **세션 켜기** – 새 세션을 시작하거나 꺼진 세션을 원래 폴더에서 이어서 켜요(새 터미널 창).
 - **부드러운 움직임** – 메뉴가 미끄러져 열리고, 칸이 접히고 펼쳐지고, 화면이 밀려 들어오고, 왼쪽 막대 표시가 따라 움직여요
   (메뉴 > 움직임으로 끌 수 있어요).

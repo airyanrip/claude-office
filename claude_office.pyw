@@ -1502,6 +1502,31 @@ def meet_prompt(n, reqs, folder, sid):
                                                           os.path.basename(shot))
 
 
+def meeting_start(app, sids, turns):
+    """고른 세션들에 업무 보고를 요청하고 meeting.json을 새로 쓴다 (회의실 화면·휴대폰 둘 다 쓴다). 보낸 수를 돌려준다."""
+    mid = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+    m = {'id': mid, 'startedAt': int(time.time() * 1000), 'turns': turns, 'members': [], 'names': {}}
+    folder = os.path.join(MEET_DIR, mid)
+    os.makedirs(folder, exist_ok=True)
+    head = meet_prompt(1, [], '', '').split(']', 1)[0] + ']'  # 지난 회의 요청은 보고할 턴에서 뺀다
+    with app.mon.lock:
+        todo = [(sid, app.mon.display_name(app.mon.sessions[sid]),
+                 [e[1] for e in app.mon.sessions[sid].qa if not e[1].startswith(head)][-turns:])
+                for sid in sids if sid in app.mon.sessions]
+    for sid, name, reqs in todo:
+        try:
+            app.mon.send_user(sid, meet_prompt(turns, reqs, folder, sid))
+        except OSError as ex:
+            app.toast(T('보내기 실패: {0}').format(ex), warn=True)
+            continue
+        m['members'].append(sid)
+        m['names'][sid] = name
+    write_json(MEET_FILE, m)
+    app.save_cfg()
+    app.toast(T('{0}개 세션에 업무 보고를 요청했어요').format(len(m['members'])))
+    return len(m['members'])
+
+
 MODE_TEXT = {'busy': T('작업 중'), 'wait': T('확인 필요'), 'idle': T('휴식'), 'sleep': T('조는 중')}
 MODE_COL = {'busy': '#2fb985', 'wait': '#f0a020', 'idle': '#5b9ee8', 'sleep': '#9a86c8'}
 LINE_COLS = ['#7fdbca', '#c792ea', '#ffcb6b', '#82aaff', '#f78c6c']
@@ -1714,6 +1739,12 @@ def draw_icon(c, kind, cx, cy, s, col, bg='#ffffff', tags=()):
         c.create_line(cx - s * 0.95, cy + s * 0.2, cx + s * 0.95, cy + s * 0.2, fill=bg, width=max(1, w * 0.6), tags=tags)
         c.create_line(cx - s * 0.6, cy + s * 0.55, cx - s * 0.6, cy + s * 0.92, **kw)
         c.create_line(cx + s * 0.6, cy + s * 0.55, cx + s * 0.6, cy + s * 0.92, **kw)
+    elif kind == 'phone':  # 원격 조종: 휴대폰 + 전파
+        round_rect(c, cx - s * 0.42, cy - s * 0.85, cx + s * 0.32, cy + s * 0.85, s * 0.16, outline=col, width=w, tags=tags)
+        c.create_line(cx - s * 0.18, cy + s * 0.6, cx + s * 0.08, cy + s * 0.6, **kw)
+        for r_ in (0.32, 0.6):
+            c.create_arc(cx + s * 0.38 - r_ * s, cy - s * 0.55 - r_ * s, cx + s * 0.38 + r_ * s, cy - s * 0.55 + r_ * s,
+                         start=-30, extent=90, style='arc', **ow)
     elif kind == 'close':
         c.create_line(cx - s * 0.6, cy - s * 0.6, cx + s * 0.6, cy + s * 0.6, **kw)
         c.create_line(cx - s * 0.6, cy + s * 0.6, cx + s * 0.6, cy - s * 0.6, **kw)
@@ -1740,6 +1771,13 @@ STORAGE = (  # (묶음, 이름, 경로, 설명, 하위 폴더도 보이기)
     (T('Claude 앱'), T('앱 캐시'), os.path.join(LOCAL, 'Claude'), T('화면 캐시·로그'), False),
     ('Claude Office', T('이 프로그램'), CACHE_DIR, T('토큰 집계 캐시와 창 설정'), False),
 )
+
+
+class _ThisModule:
+    """원격 모듈에 이 프로그램의 함수·상수를 넘길 때 쓴다 (시험에서 바꾼 값도 그대로 보이게 늘 지금 값을 읽는다)."""
+
+    def __getattr__(self, k):
+        return globals()[k]
 
 
 class PageHost(tk.Frame):
@@ -3668,30 +3706,10 @@ class MeetingWin:
         if not self.pick:
             app.toast(T('초대할 세션을 먼저 골라 주세요'), warn=True)
             return
-        old = self.meeting()
-        if old and not tkmsg.askyesno(T('회의실'), T('지금 회의를 끝내고 새 회의를 시작할까요?\n(지난 보고서는 폴더에 남아요)'), parent=self.win):
+        if read_json(MEET_FILE) and not tkmsg.askyesno(T('회의실'), T('지금 회의를 끝내고 새 회의를 시작할까요?\n(지난 보고서는 폴더에 남아요)'),
+                                                        parent=self.win):
             return
-        mid = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-        m = {'id': mid, 'startedAt': int(time.time() * 1000), 'turns': self.turns, 'members': [], 'names': {}}
-        os.makedirs(self.folder(m), exist_ok=True)
-        head = meet_prompt(1, [], '', '').split(']', 1)[0] + ']'  # 지난 회의 요청은 보고할 턴에서 뺀다
-        with app.mon.lock:
-            todo = [(sid, app.mon.display_name(app.mon.sessions[sid]),
-                     [e[1] for e in app.mon.sessions[sid].qa if not e[1].startswith(head)][-self.turns:])
-                    for sid in self.pick if sid in app.mon.sessions]
-        sent = 0
-        for sid, name, reqs in todo:
-            try:
-                app.mon.send_user(sid, meet_prompt(self.turns, reqs, self.folder(m), sid))
-            except OSError as ex:
-                app.toast(T('보내기 실패: {0}').format(ex), warn=True)
-                continue
-            m['members'].append(sid)
-            m['names'][sid] = name
-            sent += 1
-        write_json(MEET_FILE, m)
-        app.save_cfg()
-        app.toast(T('{0}개 세션에 업무 보고를 요청했어요').format(sent))
+        meeting_start(app, self.pick, self.turns)
         self.presented, self.speaker, self.pages, self.known = set(), None, [], set()
         self.f_setup.toggle(False)  # 준비 칸은 접고 회의 장면에 집중
         self.refresh()
@@ -3755,6 +3773,256 @@ class MeetingWin:
             return
         webbrowser.open('file:///' + path.replace('\\', '/'))
         self.app.toast(T('회의 자료를 저장했어요 · {0}').format(path))
+
+
+CLOUDFLARED_URL = 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe'
+
+
+class RemoteWin:
+    """원격 조종: 켜고 끄기, 휴대폰 연결(QR), 연결된 기기, 기록."""
+
+    def __init__(self, app):
+        self.app = app
+        F, Z = app.fonts, app.Z
+        self.win = w = app.make_host('phone')
+        w.title(T('원격 조종 · Claude Office'))
+        w.configure(bg=BG)
+        w.geometry(f'{int(820 * Z)}x{int(820 * Z)}')
+        w.minsize(560, 480)
+        grad_head(w, app, 'phone', T('원격 조종'),
+                  T('휴대폰으로 어디서나 세션을 보고 명령을 보내요. PC에서 바깥으로만 연결해 공유기 설정이 필요 없어요.')).pack(fill='x')
+        holder = tk.Frame(w, bg=BG, padx=14)
+        holder.pack(fill='both', expand=True, pady=(10, 12))
+        self.cv, self.inner = scroll_frame(holder, BG)
+        w.bind('<MouseWheel>', lambda e: self.cv.yview_scroll(int(-e.delta / 120), 'units'))
+        self.wraps = []
+        # 연결
+        c = self._card(T('원격 연결'))
+        row = tk.Frame(c, bg=CARD)
+        row.pack(fill='x')
+        self.dot = tk.Canvas(row, width=int(14 * Z), height=int(14 * Z), bg=CARD, highlightthickness=0)
+        self.dot.pack(side='left', padx=(0, 8))
+        self.status = tk.Label(row, text='', font=F['bodyb'], bg=CARD, fg=FG, anchor='w')
+        self.status.pack(side='left')
+        self.toggle_btn = app._btn(row, '', self.toggle, bg=ACCENT, fg='#ffffff', hover=ACC_DARK, font='menu')
+        self.toggle_btn.pack(side='right')
+        self.url = tk.Label(c, text='', font=F['small'], bg=CARD, fg=DIM, anchor='w', justify='left')
+        self.url.pack(fill='x', pady=(6, 0))
+        self.wraps.append(self.url)
+        self.dl = tk.Frame(c, bg=CARD)  # cloudflared가 없을 때
+        # 휴대폰 연결
+        c = self._card(T('휴대폰 연결'))
+        self.pair_note = tk.Label(c, text='', font=F['body'], bg=CARD, fg=TEXT2, anchor='w', justify='left')
+        self.pair_note.pack(fill='x')
+        self.wraps.append(self.pair_note)
+        self.pair_btn = app._btn(c, T('휴대폰 연결하기 (QR 보기)'), self.show_qr, bg=CARD, fg=ACC_TEXT, hover=HOVER)
+        self.pair_btn.configure(highlightbackground=ACCENT)
+        self.pair_btn.pack(anchor='w', pady=(10, 0))
+        self.qr_box = tk.Frame(c, bg=CARD)
+        self.pairing = None  # (기기 id, 띄운 시각)
+        # 기기
+        self.dev_card = self._card(T('연결된 기기'))
+        self.dev_sig = None
+        # 안내
+        c = self._card(T('어떻게 동작하나요'))
+        l = tk.Label(c, font=F['small'], bg=CARD, fg=TEXT2, anchor='w', justify='left', text=T(
+            '· PC가 Cloudflare 임시 터널을 바깥으로 열고, 휴대폰 웹앱은 그 주소로 들어와요. 공유기 포트를 열지 않아요.\n'
+            '· 터널 주소는 켤 때마다 바뀌어서, ntfy.sh의 비밀 채널에 지금 주소를 적어 두고 휴대폰이 찾아가요.\n'
+            '· 기기마다 다른 열쇠(토큰)를 QR로 한 번만 건네요. PC에는 열쇠의 지문(해시)만 남고, 열쇠 없는 요청은 모두 거절해요.\n'
+            '· 세션이 확인을 기다리거나 회의 보고서가 오면 휴대폰으로 알림을 보내요 (휴대폰 앱에서 알림을 켠 경우).\n'
+            '· 오가는 내용은 HTTPS로 암호화되지만 Cloudflare를 거쳐요. 쓰지 않을 땐 꺼 두세요.'))
+        l.pack(fill='x')
+        self.wraps.append(l)
+        c = self._card(T('기록'))
+        self.log = tk.Label(c, text='', font=F['small'], bg=CARD, fg=DIM, anchor='w', justify='left')
+        self.log.pack(fill='x')
+        self.cv.bind('<Configure>', lambda e: [x.configure(wraplength=max(240, e.width - 80)) for x in self.wraps], add='+')
+        self.refresh()
+
+    def _card(self, title):
+        outer = tk.Frame(self.inner, bg=CARD, padx=16, pady=12, highlightthickness=1, highlightbackground=EDGE)
+        outer.pack(fill='x', pady=(0, 10))
+        tk.Label(outer, text=title, font=self.app.fonts['h2'], bg=CARD, fg=FG, anchor='w').pack(fill='x', pady=(0, 8))
+        return outer
+
+    def toggle(self):
+        app = self.app
+        if app.remote and app.remote.httpd:
+            if self.pairing:
+                self.hide_qr(revoke=True)
+            app.remote_stop()
+        else:
+            app.remote_start()
+        self.refresh(force=True)
+
+    def refresh(self, force=False):
+        if not self.win.winfo_exists():
+            return
+        app, F, Z = self.app, self.app.fonts, self.app.Z
+        r = app.remote
+        st = r.status if r else 'off'
+        on = bool(r and r.httpd)
+        col = {'on': ACCENT, 'starting': '#f0a020', 'no_cloudflared': RED}.get(st, '#8a96a3')
+        self.dot.delete('all')
+        s = int(self.dot['width'])
+        self.dot.create_oval(2, 2, s - 2, s - 2, fill=col, outline='')
+        self.status.configure(text={'on': T('켜짐 · 휴대폰에서 접속할 수 있어요'), 'starting': T('연결하는 중…'),
+                                    'no_cloudflared': T('cloudflared가 없어요')}.get(st, T('꺼짐')))
+        self.toggle_btn.configure(text=T('원격 끄기') if on else T('원격 켜기'))
+        self.toggle_btn._bg = CARD2 if on else ACCENT
+        self.toggle_btn.configure(bg=self.toggle_btn._bg, fg=FG if on else '#ffffff')
+        self.url.configure(text=(T('지금 주소: {0}').format(r.url) if r and r.url else
+                                 T('켜면 Cloudflare 임시 터널을 열고 휴대폰 웹앱이 찾아올 수 있게 주소를 알려요.')))
+        if st == 'no_cloudflared' and not self.dl.winfo_ismapped():
+            for x in self.dl.winfo_children():
+                x.destroy()
+            tk.Label(self.dl, text=T('원격 연결에는 Cloudflare의 cloudflared(무료, 약 55MB)가 필요해요.'), font=F['small'], bg=CARD,
+                     fg=TEXT2).pack(side='left')
+            app._btn(self.dl, T('받기'), self.download).pack(side='left', padx=8)
+            self.dl.pack(fill='x', pady=(8, 0))
+        elif st != 'no_cloudflared' and self.dl.winfo_ismapped() and not getattr(self, 'downloading', False):
+            self.dl.pack_forget()
+        self.pair_btn.configure(state='normal')
+        self.pair_note.configure(text=(T('휴대폰 카메라로 QR을 찍으면 휴대폰 웹앱이 열리고 이 PC와 연결돼요. 홈 화면에 추가하면 앱처럼 쓸 수 있어요.')
+                                       if on else T('먼저 원격을 켜 주세요.')))
+        if not on:
+            self.pair_btn.pack_forget()
+        elif not self.pairing and not self.pair_btn.winfo_ismapped():
+            self.pair_btn.pack(anchor='w', pady=(10, 0))
+        if self.pairing and r:
+            dev = next((d for d in r.cfg['devices'] if d['id'] == self.pairing[0]), None)
+            if dev and dev.get('seen'):
+                self.hide_qr()
+                app.toast(T('휴대폰이 연결됐어요 · {0}').format(dev['name']))
+            elif time.time() - self.pairing[1] > 600:
+                self.hide_qr(revoke=True)
+        self.draw_devices(force)
+        if r:
+            self.log.configure(text='\n'.join(r.log[-8:]) or '-')
+        self.win.after(1000, self.refresh)
+
+    def show_qr(self):
+        r = self.app.remote
+        if not r or not r.httpd:
+            return
+        import office_remote
+        dev_id, link = r.pair()
+        self.pairing = (dev_id, time.time())
+        self.pair_btn.pack_forget()
+        for x in self.qr_box.winfo_children():
+            x.destroy()
+        m = office_remote.qr_matrix(link, 'M')
+        n = len(m)
+        cell = max(4, int(5 * self.app.Z))
+        q = 4
+        cv = tk.Canvas(self.qr_box, width=(n + 2 * q) * cell, height=(n + 2 * q) * cell, bg='#ffffff', highlightthickness=0)
+        for y in range(n):
+            for x in range(n):
+                if m[y][x]:
+                    cv.create_rectangle((x + q) * cell, (y + q) * cell, (x + q + 1) * cell, (y + q + 1) * cell, fill='#000000',
+                                        outline='')
+        cv.pack(side='left')
+        side = tk.Frame(self.qr_box, bg=CARD)
+        side.pack(side='left', fill='both', expand=True, padx=(16, 0))
+        F = self.app.fonts
+        l = tk.Label(side, font=F['body'], bg=CARD, fg=FG, anchor='w', justify='left', text=T(
+            '1. 휴대폰 카메라로 QR을 찍어 링크를 열어요.\n2. 웹앱이 열리면 이 PC와 바로 연결돼요.\n'
+            '3. 브라우저 메뉴의 "홈 화면에 추가"로 앱처럼 쓸 수 있어요.\n\n이 QR은 한 기기에 한 번만 써 주세요. 10분 뒤 사라져요.'))
+        l.pack(fill='x')
+        self.wraps.append(l)
+        bar = tk.Frame(side, bg=CARD)
+        bar.pack(fill='x', pady=(10, 0))
+        self.app._btn(bar, T('링크 복사'), lambda: (self.win.clipboard_clear(), self.win.clipboard_append(link),
+                                                  self.app.toast(T('연결 링크를 복사했어요 · 남에게 보내지 마세요')))).pack(side='left')
+        self.app._btn(bar, T('취소'), lambda: self.hide_qr(revoke=True)).pack(side='left', padx=6)
+        self.qr_box.pack(fill='x', pady=(12, 0))
+
+    def hide_qr(self, revoke=False):
+        if self.pairing and revoke and self.app.remote:
+            dev = next((d for d in self.app.remote.cfg['devices'] if d['id'] == self.pairing[0]), None)
+            if dev and not dev.get('seen'):  # 쓰지 않은 연결 열쇠는 없앤다
+                self.app.remote.revoke(dev['id'])
+        self.pairing = None
+        self.qr_box.pack_forget()
+        for x in self.qr_box.winfo_children():
+            x.destroy()
+
+    def draw_devices(self, force=False):
+        r = self.app.remote
+        devs = [d for d in (r.cfg['devices'] if r else []) if d.get('seen')]
+        now = time.time()
+        sig = tuple((d['id'], d['name'], int((now - d['seen']) // 60), bool(d.get('push'))) for d in devs)
+        if sig == self.dev_sig and not force:
+            return
+        self.dev_sig = sig
+        F = self.app.fonts
+        for x in self.dev_card.winfo_children()[1:]:
+            x.destroy()
+        if not devs:
+            tk.Label(self.dev_card, text=T('아직 연결된 기기가 없어요.'), font=F['body'], bg=CARD, fg=DIM, anchor='w').pack(fill='x')
+            return
+        for d in devs:
+            row = tk.Frame(self.dev_card, bg=CARD2, padx=12, pady=8)
+            row.pack(fill='x', pady=(0, 6))
+            mins = int((now - d['seen']) // 60)
+            seen = T('방금 접속') if mins < 1 else T('{0}분 전 접속').format(mins) if mins < 120 else T('{0}시간 전 접속').format(mins // 60)
+            tk.Label(row, text=clean(d['name'], 40), font=F['bodyb'], bg=CARD2, fg=FG).pack(side='left')
+            tk.Label(row, text=seen + (T(' · 알림 켬') if d.get('push') else ''), font=F['small'], bg=CARD2, fg=DIM).pack(side='left', padx=10)
+            self.app._btn(row, T('연결 끊기'), lambda i=d['id']: self.revoke(i)).pack(side='right')
+
+    def revoke(self, dev_id):
+        if tkmsg.askyesno(T('원격 조종'), T('이 기기의 연결을 끊을까요?\n다시 쓰려면 QR로 새로 연결해야 해요.'), parent=self.win):
+            self.app.remote.revoke(dev_id)
+            self.draw_devices(force=True)
+
+    def download(self):
+        """cloudflared를 GitHub(Cloudflare 공식 배포)에서 받아 이 프로그램의 데이터 폴더에 둔다."""
+        if getattr(self, 'downloading', False):
+            return
+        self.downloading = True
+        for x in self.dl.winfo_children():
+            x.destroy()
+        lab = tk.Label(self.dl, text=T('받는 중… 0%'), font=self.app.fonts['small'], bg=CARD, fg=TEXT2)
+        lab.pack(side='left')
+        dst = os.path.join(CACHE_DIR, 'cloudflared.exe')
+        prog = {'p': 0, 'err': None, 'done': False}
+
+        def work():
+            import urllib.request
+            try:
+                with urllib.request.urlopen(CLOUDFLARED_URL, timeout=30) as resp, open(dst + '.part', 'wb') as f:
+                    total = int(resp.headers.get('Content-Length') or 0)
+                    got = 0
+                    while True:
+                        b = resp.read(1 << 16)
+                        if not b:
+                            break
+                        f.write(b)
+                        got += len(b)
+                        prog['p'] = int(got * 100 / total) if total else 0
+                os.replace(dst + '.part', dst)
+            except OSError as ex:
+                prog['err'] = str(ex)
+            prog['done'] = True
+
+        threading.Thread(target=work, daemon=True).start()
+
+        def poll():
+            if not self.win.winfo_exists():
+                return
+            if not prog['done']:
+                lab.configure(text=T('받는 중… {0}%').format(prog['p']))
+                self.win.after(300, poll)
+                return
+            self.downloading = False
+            if prog['err']:
+                lab.configure(text=T('받지 못했어요: {0}').format(prog['err']), fg=RED)
+                return
+            self.dl.pack_forget()
+            self.app.remote_start()
+
+        poll()
+
 
 
 class OnboardWin:
@@ -3877,7 +4145,8 @@ class App:
         self.grid_y = WALL_H + 4
         self.tab_sig = None
         self.tab_drop = None
-        self.chatwin = self.secwin = self.avwin = self.launchwin = self.meetwin = None
+        self.chatwin = self.secwin = self.avwin = self.launchwin = self.meetwin = self.remotewin = None
+        self.remote = None  # 원격 조종 (켤 때 만든다)
         self.chat_seen = self.cfg.get('chat_seen') or time.time()
         self.pending = {}           # 이 창에서 켠 세션 id → (켠 시각, 이름) — 출근하면 골라 준다
         self.menu_open, self.menu_hover, self.menu_boxes, self.menu_off = False, None, [], 0
@@ -3967,6 +4236,8 @@ class App:
         self.toggle_top()
         root.after(200, self.refresh)
         root.after(300, self.animate)
+        if self.cfg.get('remote_on'):  # 지난번에 켜 두었으면 다시 켠다
+            root.after(1500, self.remote_start)
         if self.first_run and not self.cfg.get('onboarded'):
             root.after(3000, self._maybe_onboard)  # 첫 폴링으로 비서 세션이 이미 있는지 본 뒤
 
@@ -3998,6 +4269,8 @@ class App:
 
     def quit(self):
         self.save_cfg()
+        if self.remote and self.remote.httpd:
+            self.remote.stop(wait=3)  # 휴대폰이 '꺼짐'을 알 수 있게 잠깐 기다려 알린다
         self.mon.stop.set()
         self.mon.save_cache(force=True)
         self.root.destroy()
@@ -4298,25 +4571,29 @@ class App:
         return [('menu', T('메뉴'), self.toggle_menu, 0), ('home', T('사무실'), lambda: (self.toggle_menu(False), self.show_office()), 0),
                 ('chat', T('세션톡'), self.open_chat, unread), ('star', T('비서'), self.open_secretary, len(self.sec_items())),
                 ('meet', T('회의실'), self.open_meeting, 0),
+                ('phone', T('원격'), self.open_remote, 0),
                 ('power', T('세션 켜기'), self.open_launcher, 0), ('folder', T('저장 공간'), self.open_storage, 0)]
 
     def draw_side(self, force=False):
         items = self.side_items()
-        sig = (tuple((k, n) for k, _l, _f, n in items), self.side_hover, self.Z, self.menu_open, self.page_key, self._side_py)
+        sig = (tuple((k, n) for k, _l, _f, n in items), self.side_hover, self.Z, self.menu_open, self.page_key, self._side_py,
+               self.side.winfo_height())
         if sig == self.side_sig and not force:
             return
         self.side_sig = sig
         c, Z, F = self.side, self.Z, self.fonts
         c.delete('all')
         W = int(84 * Z)
-        h = 66 * Z
+        # 칸이 많거나 창이 낮으면 칸 높이를 줄여 모두 보이게 한다
+        h = max(44 * Z, min(66 * Z, (max(c.winfo_height(), 200) - 14 * Z) / max(1, len(items)) - 6 * Z))
+        k = h / (66 * Z)
         c.configure(width=W)
         self.side_boxes = []
         # 고른 칸 표시(본문 바탕색으로 이어 붙인 둥근 칸)는 칸을 바꾸면 새 자리로 미끄러져 간다
         sel = next((i for i, it in enumerate(items) if it[0] == ('menu' if self.menu_open else self.page_key if self.page else 'home')), 0)
         goal = 14 * Z + sel * (h + 6 * Z)
-        if self._side_py is None or getattr(self, '_side_z', None) != Z:
-            self._side_py, self._side_z, self._side_goal = goal, Z, goal
+        if self._side_py is None or getattr(self, '_side_z', None) != (Z, h):
+            self._side_py, self._side_z, self._side_goal = goal, (Z, h), goal
         elif goal != getattr(self, '_side_goal', goal):
             self._side_goal, start = goal, self._side_py
 
@@ -4335,8 +4612,8 @@ class App:
             on = abs(py - y) < h / 2
             col = (ACCENT if DARK else SIDE) if on else '#ffffff'
             wrap = F['tiny'].measure(label) > W - 12 * Z  # 긴 이름(번역)은 두 줄로
-            draw_icon(c, key, W / 2, y + (22 if wrap else 26) * Z, 13 * Z, col, BG if on else SIDE)
-            c.create_text(W / 2, y + (50 if wrap else 52) * Z, text=label, font=F['tiny'], fill=ACC_TEXT if on else '#eafff6',
+            draw_icon(c, key, W / 2, y + (22 if wrap else 26) * Z * k, 13 * Z * min(1, k + 0.1), col, BG if on else SIDE)
+            c.create_text(W / 2, y + h - (16 if wrap else 14) * Z * k, text=label, font=F['tiny'], fill=ACC_TEXT if on else '#eafff6',
                           width=W - 12 * Z, justify='center')
             if n:
                 c.create_oval(W / 2 + 10 * Z, y + 8 * Z, W / 2 + 19 * Z, y + 17 * Z, fill=RED, outline='#ffffff', width=Z)
@@ -4373,6 +4650,7 @@ class App:
                  ('spark', T('브리핑 받기') if has_sec else T('비서 만들기'), self.ask_brief if has_sec else self.create_secretary,
                   T('브리핑 중') if self.briefing() else '', 0),
                  ('meet', T('회의실'), self.open_meeting, '', 0),
+                 ('phone', T('원격 조종'), self.open_remote, T('켬') if self.remote and self.remote.httpd else '', 0),
                  ('power', T('세션 켜기'), self.open_launcher, '', 0),
                  ('user', T('아바타'), lambda: self.open_avatar(self.sel), '', 0),
                  ('tab', T('새 탭'), lambda: (self.toggle_menu(False), self._tab_edit(None)), '', 0),
@@ -4459,7 +4737,7 @@ class App:
         if i is None:
             return
         _x0, _y0, _x1, _y1, fn, icon = self.menu_boxes[i]
-        if icon in ('chat', 'star', 'meet', 'power', 'user', 'folder', 'spark'):
+        if icon in ('chat', 'star', 'meet', 'phone', 'power', 'user', 'folder', 'spark'):
             self.toggle_menu(False)  # 창을 여는 칸은 메뉴를 닫고 연다
         fn()
         if self.menu_open:
@@ -5543,6 +5821,7 @@ class App:
                 if sig != getattr(self, 'menu_sig', None):
                     self.menu_sig = sig
                     self.draw_menu()
+            self.remote_watch(sessions)
             tick = int(time.time() // 60)
             if ver != self.seen_ver or tick != self.tick:
                 self.seen_ver, self.tick = ver, tick
@@ -5943,6 +6222,72 @@ class App:
         if self.launchwin and self.launchwin.win.winfo_exists():
             self.launchwin.win.destroy()  # 꺼진 세션 목록은 열 때마다 새로
         self.launchwin = LaunchWin(self)
+
+    # ── 원격 조종 (휴대폰 웹앱) ──
+    def open_remote(self):
+        self._open_win('remotewin', lambda: RemoteWin(self))
+
+    def remote_obj(self):
+        if self.remote is None:
+            if APP_DIR not in sys.path:
+                sys.path.insert(0, APP_DIR)
+            import office_remote
+            self.remote = office_remote.Remote(self, _ThisModule())
+        return self.remote
+
+    def remote_start(self):
+        r = self.remote_obj()
+        if not r.start():
+            self.toast(T('cloudflared가 없어 원격을 켤 수 없어요 · 원격 조종 화면에서 받을 수 있어요'), warn=True)
+            return False
+        self.cfg['remote_on'] = True
+        self.save_cfg()
+        self._remote_pump()
+        return True
+
+    def remote_stop(self):
+        if self.remote:
+            self.remote.stop()
+        self.cfg['remote_on'] = False
+        self.save_cfg()
+
+    def _remote_pump(self):
+        """휴대폰 요청 중 사무실 화면 상태를 만지는 일은 Tk 스레드에서 처리한다."""
+        r = self.remote
+        if not r or not r.httpd:
+            self._pumping = False
+            return
+        self._pumping = True
+        r.pump()
+        self.root.after(80, self._remote_pump)
+
+    def remote_watch(self, sessions):
+        """휴대폰에 알릴 일: 확인이 필요해진 세션, 도착한 회의 보고서, 끝난 브리핑. 원격이 꺼져 있으면 기준만 맞춰 둔다."""
+        r = self.remote
+        on = bool(r and r.httpd)
+        modes = {s.sid: s.mode() for s in sessions}
+        old = getattr(self, '_rw_modes', None)
+        if on and old is not None:
+            with self.mon.lock:
+                for s in sessions:
+                    if modes[s.sid] == 'wait' and old.get(s.sid) != 'wait':
+                        what = ' · '.join(x for x in (s.waiting, one_line(s.last_tool, 60)) if x)
+                        r.alert(self.mon.display_name(s), T('확인이 필요해요') + (f' · {what}' if what else ''), s.sid)
+        self._rw_modes = modes
+        m = read_json(MEET_FILE)
+        got = set()
+        if isinstance(m, dict) and isinstance(m.get('members'), list):
+            folder = os.path.join(MEET_DIR, str(m.get('id')))
+            got = {(m.get('id'), sid) for sid in m['members'] if os.path.isfile(os.path.join(folder, sid + '.json'))}
+            old_got = getattr(self, '_rw_reports', None)
+            if on and old_got is not None:
+                for _mid, sid in got - old_got:
+                    r.alert((m.get('names') or {}).get(sid) or sid[:8], T('회의 보고서가 도착했어요'), sid)
+        self._rw_reports = got
+        b = self.briefing()
+        if on and getattr(self, '_rw_brief', False) and not b and self.brief_at:
+            r.alert(T('비서'), T('브리핑이 끝났어요 · 새 제안을 확인해 보세요'), self.sec_sid or '')
+        self._rw_brief = b
 
     def _maybe_onboard(self):
         if self.sec_sid or self.cfg.get('onboarded'):
