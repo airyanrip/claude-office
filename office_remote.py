@@ -2,7 +2,10 @@
 
 - 서버는 127.0.0.1에서만 열고, 바깥 연결은 Cloudflare 임시 터널(cloudflared)이 PC에서 밖으로 연다 (공유기 포트를 열지 않음).
 - 터널 주소는 켤 때마다 바뀌므로 ntfy.sh의 비밀 토픽에 지금 주소를 적어 두고, 웹앱은 거기서 찾아온다.
-- 기기마다 무작위 토큰을 QR로 한 번 건네고, PC에는 토큰의 해시만 둔다. 모든 API는 토큰이 있어야 한다.
+- 기기마다 무작위 토큰을 건네고, PC에는 토큰의 해시만 둔다. 모든 API는 토큰이 있어야 한다.
+  토큰은 QR의 한 번용 코드(10분, 한 기기)나, 사용자가 정한 암호(복사한 주소로 들어온 기기)와 바꿔서만 받는다.
+- PC는 자기 서명 열쇠를 가진다. 휴대폰은 링크로 받은 공개 열쇠로 PC의 서명을 확인한 뒤에만 토큰·암호를 보낸다
+  (ntfy 토픽이 새어 누가 가짜 주소를 올려도, 그 주소로는 아무것도 보내지 않는다).
 - '확인 필요'가 된 세션 등은 웹 푸시(VAPID, 내용 없는 푸시)로 알린다. 웹앱의 서비스 워커가 받아서 PC에 알림 내용을 묻는다.
 - 바깥 패키지 없이 표준 라이브러리만 쓴다 (P-256 서명, QR, PNG를 직접 만든다).
 """
@@ -28,6 +31,11 @@ import zlib
 
 APP_ORIGIN = 'https://airyanrip.github.io'          # 휴대폰 웹앱이 올라가 있는 곳 (설정 remote_app 으로 바꿀 수 있다)
 APP_PATH = '/claude-office/m/'
+PAIR_SECS = 600                                    # QR 한 번용 코드 유효 시간
+PW_ITER = 300_000                                  # 암호 해시(PBKDF2) 반복 횟수
+PW_MIN = 6
+PUSH_HOSTS = ('fcm.googleapis.com', 'updates.push.services.mozilla.com', 'web.push.apple.com')
+PUSH_SUFFIX = ('.notify.windows.com', '.push.apple.com', '.push.services.mozilla.com')
 NTFY = 'https://ntfy.sh/'
 CF_URL_RE = re.compile(r'https://[a-z0-9-]+\.trycloudflare\.com')
 CREATE_NO_WINDOW = 0x08000000
@@ -340,6 +348,18 @@ def _ec_mul(k, pt=_G):
     return r
 
 
+def _ec_mul_ladder(k, pt=_G):
+    """서명용 곱셈: 비밀 수를 늘 257비트로 맞추고 비트마다 같은 일(더하기+두 배)을 해서, 걸린 시간으로 비밀이 덜 드러나게."""
+    k = k + _N if (k + _N).bit_length() > 256 else k + 2 * _N
+    r0, r1 = pt, _ec_add(pt, pt)
+    for i in range(255, -1, -1):
+        if (k >> i) & 1:
+            r0, r1 = _ec_add(r0, r1), _ec_add(r1, r1)
+        else:
+            r1, r0 = _ec_add(r0, r1), _ec_add(r0, r0)
+    return r0
+
+
 def vapid_keys(priv=None):
     priv = priv or (secrets.randbelow(_N - 1) + 1)
     x, y = _ec_mul(priv)
@@ -350,7 +370,7 @@ def es256_sign(priv, msg):
     z = int.from_bytes(hashlib.sha256(msg).digest(), 'big')
     while True:
         k = secrets.randbelow(_N - 1) + 1
-        r = _ec_mul(k)[0] % _N
+        r = _ec_mul_ladder(k)[0] % _N
         s = pow(k, -1, _N) * (z + r * priv) % _N
         if r and s:
             return r.to_bytes(32, 'big') + s.to_bytes(32, 'big')
@@ -436,15 +456,22 @@ class Remote:
             self.cfg['topic'] = 'co-' + secrets.token_urlsafe(18).replace('_', 'x').replace('-', 'y')
         if not self.cfg.get('vapid'):
             self.cfg['vapid'] = hex(vapid_keys()[0])
+        if not self.cfg.get('idkey'):  # PC임을 휴대폰에 증명하는 서명 열쇠 (푸시 열쇠와 따로)
+            self.cfg['idkey'] = hex(vapid_keys()[0])
         self.cfg.setdefault('devices', [])
         self.priv, self.pub = vapid_keys(int(self.cfg['vapid'], 16))
+        self.id_priv, self.id_pub = vapid_keys(int(self.cfg['idkey'], 16))
+        self.codes = {}          # QR 한 번용 코드의 해시 → (만료 시각, 만들 기기 id)
+        self.fail_log = {}       # (종류, IP) → 실패 시각들 (막무가내 시도 막기)
+        self.pw_fails = []       # 암호 실패 시각 (모든 IP 합쳐서)
+        self.pw_locked = 0       # 이 시각까지 암호 연결을 막는다
+        self.signs = []          # 최근 서명 시각 (서명을 마구 시키지 못하게)
         self.lock = threading.Lock()
         self.httpd = self.tunnel = None
         self.url = None
         self.status = 'off'      # off / starting / on / no_cloudflared / error
         self.log = []
         self.alerts = []         # 휴대폰에 알릴 것 [{id, ts, title, body, sid}]
-        self.fails = []          # 실패한 인증 시각 (막무가내 시도 막기)
         self.q = queue.Queue()   # Tk 스레드에서 돌릴 일
         self.sprites = {}
         self.save()
@@ -501,14 +528,8 @@ class Remote:
         """PC에서 휴대폰 화면을 띄워 볼 주소. 미리보기 기기는 하나만 두고 열 때마다 열쇠를 새로 만든다."""
         with self.lock:
             self.cfg['devices'] = [d for d in self.cfg['devices'] if not d.get('preview')]
-        dev_id, link = self.pair('PC preview')
-        tok = urllib.parse.parse_qs(link.split('#', 1)[1])['k'][0]
-        with self.lock:
-            for d in self.cfg['devices']:
-                if d['id'] == dev_id:
-                    d['preview'] = True
-        self.save()
-        frag = urllib.parse.urlencode({'k': tok, 't': self.cfg['topic'], 'u': self.local_url})
+        _dev, tok = self._new_device('PC preview', 'preview')
+        frag = urllib.parse.urlencode({'k': tok, 't': self.cfg['topic'], 'u': self.local_url, 's': b64u(self.id_pub)})
         return f'{self.local_url}/m/#{frag}'
 
     def stop(self, wait=0):
@@ -550,7 +571,8 @@ class Remote:
 
     def _publish(self, url):
         try:
-            body = json.dumps({'u': url or '', 'ts': int(time.time())}).encode()
+            ts = int(time.time())
+            body = json.dumps({'u': url or '', 'ts': ts, 'sig': self.sign(f'co-url|{url or ""}|{ts}')}).encode()
             req = urllib.request.Request(NTFY + self.cfg['topic'], data=body, method='POST',
                                          headers={'Title': 'claude-office', 'Priority': 'min', 'Tags': 'computer'})
             urllib.request.urlopen(req, timeout=15).read()
@@ -559,16 +581,137 @@ class Remote:
             self.note(f'ntfy: {ex}')
 
     # ── 기기 ──
-    def pair(self, name=''):
-        """새 기기용 토큰을 만들고 휴대폰이 열 주소(QR에 담을 것)를 돌려준다. 토큰은 PC에 해시로만 남는다."""
+    def sign(self, text):
+        return b64u(es256_sign(self.id_priv, text.encode()))
+
+    @property
+    def fingerprint(self):
+        """PC 확인 코드: 휴대폰의 암호 화면에도 같은 코드가 보인다 (다른 PC·가짜 페이지가 아닌지 눈으로 확인)."""
+        h = hashlib.sha256(self.id_pub).hexdigest()[:8].upper()
+        return h[:4] + '-' + h[4:]
+
+    def _new_device(self, name, via, dev_id=None):
         tok = secrets.token_urlsafe(24)
-        dev = {'id': secrets.token_hex(4), 'name': name or '새 기기', 'hash': hashlib.sha256(tok.encode()).hexdigest(),
-               'created': int(time.time()), 'seen': 0, 'push': None}
+        now = int(time.time())
+        dev = {'id': dev_id or secrets.token_hex(4), 'name': _clip(name, 40) or '새 기기', 'hash': hashlib.sha256(tok.encode()).hexdigest(),
+               'created': now, 'seen': now, 'push': None, 'via': via}
+        if via == 'preview':
+            dev['preview'] = True
         with self.lock:
             self.cfg['devices'].append(dev)
         self.save()
-        frag = urllib.parse.urlencode({'k': tok, 't': self.cfg['topic'], 'u': self.url or ''})
-        return dev['id'], f'{self.app_url}#{frag}'
+        return dev, tok
+
+    def _frag(self, **extra):
+        return urllib.parse.urlencode(dict(extra, t=self.cfg['topic'], u=self.url or '', s=b64u(self.id_pub)))
+
+    def pair(self, name=''):
+        """QR에 담을 링크: 한 번만 쓰는 코드(10분)를 담는다. 휴대폰이 이 코드를 기기 열쇠로 바꾸는 순간 코드는 사라져서,
+        링크가 남에게 새어도 다시 쓸 수 없다."""
+        code = secrets.token_urlsafe(16)
+        dev_id = secrets.token_hex(4)
+        now = time.time()
+        with self.lock:
+            self.codes = {h: v for h, v in self.codes.items() if v[0] > now}
+            self.codes[hashlib.sha256(code.encode()).hexdigest()] = (now + PAIR_SECS, dev_id)
+        return dev_id, f'{self.app_url}#{self._frag(p=code)}'
+
+    def cancel_pair(self, dev_id):
+        with self.lock:
+            self.codes = {h: v for h, v in self.codes.items() if v[1] != dev_id}
+
+    def redeem(self, code, name, ip):
+        """한 번용 코드 → 기기 열쇠. 틀리거나 지난 코드면 None."""
+        with self.lock:
+            ent = self.codes.pop(hashlib.sha256(code.encode()).hexdigest(), None) if code else None
+        if not ent or ent[0] < time.time():
+            self.fail('code', ip)
+            return None
+        dev, tok = self._new_device(name, 'qr', ent[1])
+        self.note(f'paired (QR) {dev["name"]}')
+        return tok
+
+    def share_link(self):
+        """복사해서 건네는 주소: 열쇠·코드는 없다. 이 주소로 들어온 기기는 암호를 맞혀야 연결된다."""
+        return f'{self.app_url}#{self._frag()}'
+
+    # ── 암호 ──
+    @property
+    def has_password(self):
+        return bool(self.cfg.get('pw'))
+
+    def set_password(self, pw):
+        if len(pw) < PW_MIN or len(pw) > 128:
+            raise ValueError('length')
+        salt = secrets.token_bytes(16)
+        with self.lock:
+            self.cfg['pw'] = {'salt': salt.hex(), 'iter': PW_ITER,
+                              'hash': hashlib.pbkdf2_hmac('sha256', pw.encode(), salt, PW_ITER).hex()}
+            self.pw_fails, self.pw_locked = [], 0
+        self.save()
+        self.note('password set')
+
+    def clear_password(self):
+        with self.lock:
+            self.cfg.pop('pw', None)
+        self.save()
+        self.note('password removed')
+
+    def revoke_all(self):
+        with self.lock:
+            self.cfg['devices'] = [d for d in self.cfg['devices'] if d.get('preview')]
+        self.save()
+
+    def login(self, pw, name, ip):
+        """암호 → 기기 열쇠. ('ok', 열쇠) / ('nopw'|'locked'|'bad', None).
+        한 IP에서 15분에 5번, 모두 합쳐 1시간에 20번 틀리면 막는다 (막히면 PC 화면과 휴대폰 알림으로 알린다)."""
+        spec = self.cfg.get('pw')
+        if not spec:
+            return 'nopw', None
+        now = time.time()
+        if now < self.pw_locked or self.too_many('pw', ip, 5, 900):
+            return 'locked', None
+        got = hashlib.pbkdf2_hmac('sha256', pw.encode()[:256], bytes.fromhex(spec['salt']), int(spec['iter'])).hex()
+        if not hmac.compare_digest(got, spec['hash']):
+            self.fail('pw', ip)
+            with self.lock:
+                self.pw_fails = [t for t in self.pw_fails if now - t < 3600] + [now]
+                lock = len(self.pw_fails) >= 20
+                if lock:
+                    self.pw_locked, self.pw_fails = now + 3600, []
+            self.note(f'wrong password ({ip})')
+            if lock:
+                self.note('password login locked for 1h')
+                self.alert('Claude Office', getattr(self.co, 'REMOTE_LOCKED', 'Too many wrong passwords. Password login is locked for 1 hour.'))
+            return 'bad', None
+        dev, tok = self._new_device(name, 'pw')
+        self.note(f'paired (password) {dev["name"]}')
+        self.alert('Claude Office', getattr(self.co, 'REMOTE_NEW_DEVICE', 'A new device connected with the password · {0}').format(dev['name']))
+        return 'ok', tok
+
+    # ── 실패 기록 ──
+    def fail(self, kind, ip):
+        now = time.time()
+        with self.lock:
+            if len(self.fail_log) > 5000:
+                self.fail_log.clear()
+            k = (kind, ip)
+            self.fail_log[k] = [t for t in self.fail_log.get(k, []) if now - t < 3600] + [now]
+
+    def too_many(self, kind, ip, n, secs):
+        now = time.time()
+        with self.lock:
+            return len([t for t in self.fail_log.get((kind, ip), []) if now - t < secs]) >= n
+
+    def may_sign(self):
+        """주소 확인 서명은 10초에 30번까지만 (서명을 마구 시켜 PC를 바쁘게 하거나 열쇠를 캐내려는 시도 막기)."""
+        now = time.time()
+        with self.lock:
+            self.signs = [t for t in self.signs if now - t < 10]
+            if len(self.signs) >= 30:
+                return False
+            self.signs.append(now)
+            return True
 
     def revoke(self, dev_id):
         with self.lock:
@@ -576,18 +719,15 @@ class Remote:
         self.save()
 
     def auth(self, header, ip):
-        now = time.time()
-        self.fails = [t for t in self.fails if now - t < 600]
-        if len(self.fails) > 40:  # 10분에 40번 넘게 틀리면 잠시 모두 거절
-            return None
+        """맞는 열쇠는 늘 통과한다 (남이 틀린 열쇠를 마구 보내도 내 기기가 막히지 않게). 틀린 열쇠는 IP별로 적어 늦게 답한다."""
         tok = header[7:] if header.startswith('Bearer ') else ''
         hsh = hashlib.sha256(tok.encode()).hexdigest()
         with self.lock:
             dev = next((d for d in self.cfg['devices'] if hmac.compare_digest(d['hash'], hsh)), None) if tok else None
             if dev:
-                dev['seen'] = int(now)
+                dev['seen'] = int(time.time())
         if not dev:
-            self.fails.append(now)
+            self.fail('tok', ip)
         return dev
 
     # ── 알림 ──
@@ -604,7 +744,7 @@ class Remote:
 
     def _push(self, dev_id, sub):
         ep = sub.get('endpoint', '')
-        if not ep.startswith('https://'):
+        if not push_ok(ep):
             return
         try:
             req = urllib.request.Request(ep, data=b'', method='POST', headers={
@@ -749,24 +889,70 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self._handle('POST')
 
+    def _body(self):
+        """POST 본문(JSON 객체). 크기가 이상하거나 JSON이 아니면 None."""
+        try:
+            n = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            return None
+        if n < 0 or n > 64_000:
+            return None
+        try:
+            body = json.loads(self.rfile.read(n) or b'{}')
+        except ValueError:
+            return None
+        return body if isinstance(body, dict) else None
+
+    def _ping(self, q):
+        """살아 있는지 + PC 서명: 휴대폰이 보낸 무작위 값과 '휴대폰이 부른 주소'에 서명해, 가짜 서버가 진짜 PC에
+        물어 온 서명을 그대로 내밀어도 주소가 달라 걸리게 한다."""
+        r = self.remote
+        out = {'ok': True, 'app': 'claude-office', 'pw': r.has_password}
+        n = q.get('n', '')
+        if re.fullmatch(r'[A-Za-z0-9_-]{16,64}', n) and r.may_sign():
+            via_tunnel = bool(self.headers.get('CF-Connecting-IP') or self.headers.get('Cf-Ray'))
+            base = r.url if via_tunnel else r.local_url
+            if base:
+                out['sig'] = r.sign(f'co-ping|{n}|{base}')
+        return self._send(200, out)
+
+    def _open_api(self, path, ip):
+        """열쇠 없이 부르는 것: 한 번용 코드나 암호를 기기 열쇠로 바꾼다."""
+        r = self.remote
+        body = self._body()
+        if body is None:
+            return self._send(400, {'error': 'bad json'})
+        name = str(body.get('name') or '')[:40]
+        if path == '/api/pair':
+            tok = r.redeem(str(body.get('code') or '')[:64], name, ip)
+            if not tok:
+                time.sleep(0.6)
+                return self._send(401, {'error': 'expired'})
+            return self._send(200, {'k': tok})
+        status, tok = r.login(str(body.get('pw') or '')[:256], name, ip)
+        if status == 'ok':
+            return self._send(200, {'k': tok})
+        time.sleep(1.0)
+        return self._send({'nopw': 403, 'locked': 429}.get(status, 401), {'error': status})
+
     def _handle(self, method):
         u = urllib.parse.urlsplit(self.path)
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
         if u.path == '/api/ping':
-            return self._send(200, {'ok': True, 'app': 'claude-office'})
+            return self._ping(q)
         if method == 'GET' and (u.path in ('/', '/m') or u.path.startswith('/m/')):
             return self._static(u.path)
         ip = self.headers.get('CF-Connecting-IP') or self.client_address[0]
+        if method == 'POST' and u.path in ('/api/pair', '/api/login'):
+            return self._open_api(u.path, ip)
         dev = self.remote.auth(self.headers.get('Authorization', ''), ip)
         if not dev:
-            time.sleep(0.4)
+            time.sleep(1.5 if self.remote.too_many('tok', ip, 30, 600) else 0.4)
             return self._send(401, {'error': 'unauthorized'})
-        q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
         body = {}
         if method == 'POST':
-            n = min(int(self.headers.get('Content-Length') or 0), 64_000)
-            try:
-                body = json.loads(self.rfile.read(n) or b'{}')
-            except ValueError:
+            body = self._body()
+            if body is None:
                 return self._send(400, {'error': 'bad json'})
         fn = API.get((method, u.path))
         if not fn:
@@ -798,6 +984,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
 
 # ───────────────────────────── API ─────────────────────────────
+def push_ok(ep):
+    """알려진 웹 푸시 서비스 주소만 (PC가 아무 주소로나 요청을 보내게 쓰이지 않게)."""
+    u = urllib.parse.urlsplit(ep)
+    host = (u.hostname or '').lower()
+    return u.scheme == 'https' and (host in PUSH_HOSTS or host.endswith(PUSH_SUFFIX))
+
+
 def _clip(s, n):
     s = str(s or '')
     return s if len(s) <= n else s[:n] + '…'
@@ -1049,7 +1242,7 @@ def api_resume(r, dev, q, body):
 
 
 def api_new(r, dev, q, body):
-    cwd, name = str(body.get('cwd') or ''), str(body.get('name') or '')[:40]
+    cwd, name = str(body.get('cwd') or ''), str(body.get('name') or '')[:40].lstrip('-').strip()  # 이름이 claude 옵션으로 읽히지 않게
     if not os.path.isdir(cwd):
         raise ValueError('folder missing')
 
@@ -1068,12 +1261,12 @@ def api_hello(r, dev, q, body):
                 if d['id'] == dev['id']:
                     d['name'] = name
         r.save()
-    return {'ok': True, 'device': dev['id'], 'vapid': b64u(r.pub), 'lang': r.co.LANG}
+    return {'ok': True, 'device': dev['id'], 'vapid': b64u(r.pub), 'id': b64u(r.id_pub), 'lang': r.co.LANG}
 
 
 def api_push(r, dev, q, body):
     sub = body.get('sub')
-    if sub is not None and not (isinstance(sub, dict) and str(sub.get('endpoint', '')).startswith('https://')):
+    if sub is not None and not (isinstance(sub, dict) and push_ok(str(sub.get('endpoint', '')))):
         raise ValueError('sub')
     with r.lock:
         for d in r.cfg['devices']:

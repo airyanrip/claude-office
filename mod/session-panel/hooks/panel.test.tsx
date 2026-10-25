@@ -48,8 +48,8 @@ const world = (on: On) => {
 const peerFile = (at: number) =>
   JSON.stringify({
     sessionId: 'sess-b',
-    label: 'ERAutoChess',
-    root: 'C:/UnityProjects/ERAutoChess',
+    label: 'game-client',
+    root: 'C:/work/game-client',
     goal: '상점 UI 다듬기',
     tasks: [
       { id: '1', title: '카드 배치', status: 'completed' },
@@ -98,25 +98,25 @@ test('다른 세션의 진행 상황이 보이고, 메시지를 주고받는다'
   await clock.advance(1000)
   files.set(
     `${DIR}\\out-sess-b.json`,
-    JSON.stringify([{ id: 'm1', from: 'sess-b', fromLabel: 'ERAutoChess', to: 'server', kind: 'question', text: '매치 서버 포트가 뭐예요?', at: await clock.now() }]),
+    JSON.stringify([{ id: 'm1', from: 'sess-b', fromLabel: 'game-client', to: 'server', kind: 'question', text: '매치 서버 포트가 뭐예요?', at: await clock.now() }]),
   )
   await clock.advance(4000)
 
   // 질문이 Claude에게(user 행) 그리고 사용자에게(system 알림) 전해진다
-  expect(appended.some(line => line.startsWith('user:[협업 메시지] "ERAutoChess"') && line.includes('매치 서버 포트가 뭐예요?'))).toBe(true)
-  expect(appended.some(line => line.startsWith('system:📨 ERAutoChess'))).toBe(true)
+  expect(appended.some(line => line.startsWith('user:[협업 메시지] "game-client"') && line.includes('매치 서버 포트가 뭐예요?'))).toBe(true)
+  expect(appended.some(line => line.startsWith('system:📨 game-client'))).toBe(true)
   // 같은 메시지를 두 번 전하지 않는다
   await clock.advance(4000)
   expect(appended.filter(line => line.startsWith('user:')).length).toBe(1)
 
   const peers = await $.tool.call({ tool: 'mcp__session-panel__peers' })
-  expect(String(peers.result)).toContain('"ERAutoChess" — C:/UnityProjects/ERAutoChess — 진행중')
+  expect(String(peers.result)).toContain('"game-client" — C:/work/game-client — 진행중')
   expect(String(peers.result)).toContain('▶ 가격 표시 (50%)')
 
-  const sent = await $.tool.call({ tool: 'mcp__session-panel__send', to: 'erautochess', kind: 'answer', text: '7799 입니다' })
-  expect(String(sent.result)).toContain('"ERAutoChess"에 답변을 보냈습니다')
+  const sent = await $.tool.call({ tool: 'mcp__session-panel__send', to: 'GAME-CLIENT', kind: 'answer', text: '7799 입니다' })
+  expect(String(sent.result)).toContain('"game-client"에 답변을 보냈습니다')
   const out = JSON.parse(files.get(`${DIR}\\out-sess-a.json`) ?? '[]') as { to: string; text: string }[]
-  expect(out[0]).toMatchObject({ to: 'ERAutoChess', text: '7799 입니다' })
+  expect(out[0]).toMatchObject({ to: 'game-client', text: '7799 입니다' })
 
   const wrong = await $.tool.call({ tool: 'mcp__session-panel__send', to: '없는세션', kind: 'info', text: 'x' })
   expect(String(wrong.result)).toContain('"없는세션" 이름의 세션이 없습니다')
@@ -125,10 +125,10 @@ test('다른 세션의 진행 상황이 보이고, 메시지를 주고받는다'
   expect(JSON.parse(files.get(`${DIR}\\peer-sess-a.json`) ?? '{}')).toMatchObject({ sessionId: 'sess-a', label: 'server' })
 
   const ui = await $.ui.mount({ plugin: 'session-panel', surface: 'terminal', ...PANE })
-  expect(await ui.find({ type: 'Text', text: /ERAutoChess — 가격 표시 작업 진행중 · 전체 75%/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /◀ ERAutoChess에게서 · 질문/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /game-client — 가격 표시 작업 진행중 · 전체 75%/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /◀ game-client에게서 · 질문/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /매치 서버 포트가 뭐예요\?/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /▶ ERAutoChess에게 · 답변/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /▶ game-client에게 · 답변/ })).toBeDefined()
   await ui.unmount()
 
   // 사용자가 정한 이름(names.json)이 탭 이름보다 앞선다

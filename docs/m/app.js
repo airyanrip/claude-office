@@ -32,6 +32,16 @@ const STR = {
   qa: ['대화', 'Q&A', '会話', '对话'], log: ['작업 로그', 'Log', '作業ログ', '工作日志'], tasks: ['작업 분배', 'Tasks', 'タスク', '任务'],
   noQa: ['아직 기록이 없어요', 'Nothing yet', 'まだ記録がありません', '还没有记录'],
   all: ['전체', 'All', 'すべて', '全部'], me: ['나', 'Me', '自分', '我'], read: ['읽음', 'Read', '既読', '已读'],
+  joinTitle: ['이 PC에 연결하기', 'Connect to this PC', 'このPCに接続', '连接到此电脑'],
+  joinSub: ['PC의 원격 조종 화면에서 정한 암호를 입력해 주세요.', 'Enter the password set in Remote on the PC.', 'PCのリモート操作で決めたパスワードを入力してください。', '请输入在电脑远程控制中设置的密码。'],
+  pwPh: ['암호', 'Password', 'パスワード', '密码'], pwBtn: ['연결', 'Connect', '接続', '连接'],
+  pwBad: ['암호가 맞지 않아요', 'Wrong password', 'パスワードが違います', '密码不正确'],
+  pwLocked: ['너무 많이 틀렸어요. 잠시 뒤에 다시 해 주세요', 'Too many attempts. Try again later', '試行回数が多すぎます。しばらくしてから再度お試しください', '尝试次数过多，请稍后再试'],
+  noPwSet: ['PC에 암호가 없어서 주소로는 연결할 수 없어요. PC의 원격 조종 화면에서 암호를 정하거나 QR로 연결해 주세요.', 'The PC has no password, so this address can\'t connect. Set a password in Remote on the PC, or connect with the QR code.', 'PCにパスワードがないため、このアドレスでは接続できません。PCのリモート操作でパスワードを設定するか、QRで接続してください。', '电脑未设置密码，无法通过此地址连接。请在电脑的远程控制中设置密码，或用二维码连接。'],
+  linkUsed: ['이 연결 링크는 이미 쓰였거나 10분이 지나 사라졌어요.', 'This link was already used or has expired (10 minutes).', 'この接続リンクは使用済みか、10分が過ぎて無効になりました。', '此连接链接已被使用或已过期（10分钟）。'],
+  pcCode: ['PC 확인 코드 {0}', 'PC code {0}', 'PC確認コード {0}', '电脑确认码 {0}'],
+  pcCodeSub: ['PC 원격 조종 화면의 코드와 같은지 확인하세요', 'Check that it matches the code in Remote on your PC', 'PCのリモート操作画面のコードと同じか確認してください', '请确认与电脑远程控制中显示的一致'],
+  netErr: ['PC에 닿지 못했어요', 'Could not reach the PC', 'PCに接続できませんでした', '无法连接到电脑'],
   members: ['대화상대', 'Members', 'メンバー', '成员'], searchName: ['이름 검색', 'Search names', '名前で検索', '搜索名称'],
   allRoom: ['전체 채팅방', 'All chats', '全体チャット', '全部聊天'], allRoomSub: ['모든 세션의 대화를 한곳에서', 'Every session in one place', 'すべてのセッションの会話をまとめて', '所有会话的对话'],
   sessionsN: ['세션 {0}', 'Sessions {0}', 'セッション {0}', '会话 {0}'], noMatch: ['찾는 세션이 없어요', 'No matching session', '該当するセッションがありません', '没有匹配的会话'],
@@ -115,14 +125,21 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ───────────── 연결 정보 ─────────────
 let conf = JSON.parse(localStorage.getItem('co.conf') || 'null') || {};
-(function takePairing() {  // QR 링크: #k=열쇠&t=채널&u=주소
+// PC 주소로 받아들이는 것: Cloudflare 임시 터널, 또는 이 PC 안(미리보기)
+const okU = u => /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(u) || /^http:\/\/(127\.0\.0\.1|localhost):\d{2,5}$/.test(u);
+// 링크: #t=채널&u=주소&s=PC 공개 열쇠 + (QR) p=한 번용 코드 / (미리보기) k=열쇠 / (복사한 주소) 없음 → 암호
+(function takePairing() {
   if (!location.hash) return;
   const p = new URLSearchParams(location.hash.slice(1));
-  if (p.get('k') && p.get('t')) {
-    conf = { k: p.get('k'), t: p.get('t'), u: p.get('u') || '' };
+  const tp = p.get('t') || '', u = p.get('u') || '', s = p.get('s') || '', k = p.get('k'), code = p.get('p');
+  if (/^co-[\w-]{8,64}$/.test(tp) && (!u || okU(u)) && (!s || /^[\w-]{80,100}$/.test(s))) {
+    const same = conf.k && conf.t === tp && (!s || !conf.s || conf.s === s);  // 이미 이 PC와 연결된 기기는 열쇠를 그대로 쓴다
+    if (k) conf = { k, t: tp, u, s };
+    else if (same) { if (u && u !== conf.u) conf.alt = u; if (!conf.s && s) conf.s = s; }  // 새 주소는 서명을 확인한 뒤에야 쓴다
+    else conf = { t: tp, u, s, p: code || '' };
     saveConf();
   }
-  history.replaceState(null, '', location.pathname + location.search);  // 열쇠를 주소 표시줄·기록에 남기지 않는다
+  history.replaceState(null, '', location.pathname + location.search);  // 열쇠·코드를 주소 표시줄·기록에 남기지 않는다
 })();
 function saveConf() {
   localStorage.setItem('co.conf', JSON.stringify(conf));
@@ -177,17 +194,42 @@ async function api(path, body, { timeout = body ? 25000 : 12000, raw = false, et
     return data;
   } finally { clearTimeout(tm); }
 }
+// ── PC 서명 확인: 링크로 받은 PC 공개 열쇠(conf.s)로 확인한 주소에만 열쇠·암호를 보낸다 ──
+const b64uDec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), c => c.charCodeAt(0));
+const b64u = a => btoa(String.fromCharCode(...a)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const pcKeys = {};
+async function verifySig(text, sig) {
+  try {
+    if (!pcKeys[conf.s]) pcKeys[conf.s] = await crypto.subtle.importKey('raw', b64uDec(conf.s), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+    return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pcKeys[conf.s], b64uDec(sig), new TextEncoder().encode(text));
+  } catch (e) { return false; }
+}
+async function pcCode() {  // PC 화면의 'PC 확인 코드'와 같은 값
+  try {
+    const d = new Uint8Array(await crypto.subtle.digest('SHA-256', b64uDec(conf.s)));
+    const x = [...d.slice(0, 4)].map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+    return x.slice(0, 4) + '-' + x.slice(4);
+  } catch (e) { return ''; }
+}
+let pcInfo = {};
 async function ping(u) {
   try {
     const ctl = new AbortController();
     setTimeout(() => ctl.abort(), 6000);
-    const r = await fetch(u + '/api/ping', { signal: ctl.signal, cache: 'no-store' });
-    return r.ok && (await r.json()).app === 'claude-office';
+    const n = b64u(crypto.getRandomValues(new Uint8Array(18)));
+    const r = await fetch(u + '/api/ping?n=' + n, { signal: ctl.signal, cache: 'no-store' });
+    const d = await r.json();
+    if (!r.ok || d.app !== 'claude-office') return false;
+    if (conf.s && !(d.sig && await verifySig('co-ping|' + n + '|' + u, d.sig))) return false;  // 가짜 서버
+    pcInfo = d;
+    return true;
   } catch (e) { return false; }
 }
 async function findPC() {
   // 저장된 주소 → 안 되면 ntfy의 비밀 채널에서 PC가 마지막으로 알린 주소
-  if (conf.u && await ping(conf.u)) return true;
+  for (const u of [conf.u, conf.alt]) {
+    if (u && okU(u) && await ping(u)) { conf.u = u; delete conf.alt; saveConf(); return true; }
+  }
   try {
     const r = await fetch('https://ntfy.sh/' + encodeURIComponent(conf.t) + '/json?poll=1&since=12h', { cache: 'no-store' });
     const lines = (await r.text()).trim().split('\n').filter(Boolean);
@@ -195,6 +237,7 @@ async function findPC() {
       const m = JSON.parse(lines[i]);
       if (m.event !== 'message') continue;
       const d = JSON.parse(m.message || '{}');
+      if (conf.s && !(d.sig && await verifySig('co-url|' + (d.u || '') + '|' + d.ts, d.sig))) continue;  // PC가 올린 게 아니면 무시
       if (!d.u) { pcOff = true; return false; }
       if (/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(d.u) && await ping(d.u)) {
         conf.u = d.u; saveConf(); pcOff = false; return true;
@@ -206,20 +249,47 @@ async function findPC() {
   return false;
 }
 
-let state = null, stateSig = '';
+let state = null, stateSig = '', join = '';
+// 열쇠 없이 부르는 것 (한 번용 코드·암호를 열쇠로 바꾸기)
+async function openPost(path, body) {
+  try {
+    const r = await fetch(conf.u + path, { method: 'POST', cache: 'no-store', referrerPolicy: 'no-referrer',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    let data = {};
+    try { data = await r.json(); } catch (e) { /* 무시 */ }
+    return { ok: r.ok, status: r.status, data };
+  } catch (e) { return { ok: false, status: 0, data: {} }; }
+}
 async function connect() {
   setConn('connecting');
-  if (!conf.k) { render(); return; }
+  if (!conf.k && !conf.t) { render(); return; }
   for (let wait = 2000; ; wait = Math.min(wait * 1.6, 20000)) {
     if (await findPC()) break;
     setConn('off');
     render();
     await sleep(wait);
   }
+  if (!conf.k) {
+    if (conf.p) {  // QR: 한 번용 코드를 이 기기의 열쇠로 바꾼다
+      const r = await openPost('/api/pair', { code: conf.p, name: deviceName() });
+      delete conf.p;
+      if (r.ok && r.data.k) conf.k = r.data.k; else join = 'expired';
+      saveConf();
+    }
+    if (!conf.k) {  // 복사한 주소: 암호를 묻는다
+      if (join !== 'expired') join = pcInfo.pw ? 'pw' : 'nopw';
+      setConn('off');
+      render();
+      return;
+    }
+  }
+  join = '';
   try {
     const hi = await api('/api/hello', { name: deviceName() });
     if (!localStorage.getItem('co.lang') && hi.lang) LANG = hi.lang;
-    conf.vapid = hi.vapid; saveConf();
+    conf.vapid = hi.vapid;
+    if (!conf.s && hi.id) conf.s = hi.id;  // 예전에 연결한 기기: 이제부터 PC 서명을 확인한다
+    saveConf();
   } catch (e) { if (revoked) { setConn('off'); render(); return; } }
   online = true;
   setConn('on');
@@ -361,7 +431,8 @@ function render(quiet, dir) {
   v.style.transform = ''; v.style.transition = ''; v.style.opacity = '';
   v.className = quiet ? '' : dir < 0 ? 'view-in from-left' : 'view-in';
   document.body.dataset.tab = online && state ? tab : '';
-  if (!conf.k) return v.append(hero('🔗', t('notPaired'), t('notPairedSub')));
+  if (!conf.k && !conf.t) return v.append(hero('🔗', t('notPaired'), t('notPairedSub')));
+  if (!conf.k && join) return v.append(joinView());
   if (revoked) return v.append(hero('⛔', t('revoked'), t('notPairedSub')));
   if (!online || !state) {
     return v.append(pcOff ? hero('💤', t('pcOff'), t('pcOffSub')) : h('div', { class: 'hero' }, h('div', { class: 'spin' }), h('p', { class: 'text2', text: t('connecting') })));
@@ -372,6 +443,40 @@ function render(quiet, dir) {
   markTab();
   if (sheetFor) refreshSheet();
   if (!$('#drawer').hidden) { if (tab === 'talk') fillDrawer(); else closeDrawer(); }
+}
+function joinView() {
+  const box = h('div', { class: 'hero join' }, h('div', { class: 'big', text: '🔒' }), h('h2', { text: t('joinTitle') }));
+  if (join === 'expired') box.append(h('p', { class: 'text2', text: t('linkUsed') }));
+  if (!pcInfo.pw) { box.append(h('p', { class: 'text2', text: t('noPwSet') })); return box; }
+  box.append(h('p', { class: 'text2', text: t('joinSub') }));
+  const fp = h('div', { class: 'fp' });
+  if (conf.s) pcCode().then(x => { if (x) fp.append(h('b', { text: t('pcCode', x) }), h('span', { text: t('pcCodeSub') })); });
+  const inp = h('input', { type: 'password', placeholder: t('pwPh'), autocomplete: 'current-password', enterkeyhint: 'go', maxlength: '128' });
+  const err = h('div', { class: 'join-err' });
+  const btn = h('button', { class: 'btn pri block', text: t('pwBtn') });
+  const submit = async () => {
+    if (!inp.value || btn.disabled) return;
+    btn.disabled = true;
+    err.textContent = '';
+    if (!await ping(conf.u)) { err.textContent = t('netErr'); btn.disabled = false; return; }  // 보내기 직전에 진짜 PC인지 다시 확인
+    const r = await openPost('/api/login', { pw: inp.value, name: deviceName() });
+    if (r.ok && r.data.k) {
+      inp.value = '';
+      conf.k = r.data.k; saveConf();
+      revoked = false; join = '';
+      buzz(20);
+      connect();
+      return;
+    }
+    err.textContent = t(r.status === 429 ? 'pwLocked' : r.status === 403 ? 'noPwSet' : r.status === 401 ? 'pwBad' : 'netErr');
+    if (r.status === 401) { inp.select(); buzz(40); }
+    btn.disabled = false;
+  };
+  btn.onclick = submit;
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  box.append(fp, h('div', { class: 'join-form' }, inp, err, btn));
+  setTimeout(() => inp.focus(), 300);
+  return box;
 }
 function hero(icon, title, sub) {
   return h('div', { class: 'hero' }, h('div', { class: 'big', text: icon }), h('h2', { text: title }), h('p', { class: 'text2', text: sub }));

@@ -2,3 +2,22 @@ __pycache__/
 *.pyc
 *.lnk
 *.tmp
+
+# 개인 데이터·비밀 — 이 저장소에는 절대 올리지 않는다 (앱 데이터는 %LOCALAPPDATA%\ClaudeOffice, ~/.claude 에 있다)
+.private-words
+*.jsonl
+remote.json
+settings.json*
+tokens.json
+secretary.json
+names.json
+peer-*.json
+out-*.json
+meeting/
+preview-browser/
+cloudflared*.exe
+.env
+.env.*
+*.pem
+*.key
+*.log

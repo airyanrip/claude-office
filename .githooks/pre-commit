@@ -1,0 +1,9 @@
+#!/bin/sh
+# 커밋 전에 개인 정보·비밀 검사 (켜기: git config core.hooksPath .githooks)
+for py in py python python3; do
+  if "$py" -c "import sys" >/dev/null 2>&1; then
+    exec "$py" "$(git rev-parse --show-toplevel)/tools/check_private.py"
+  fi
+done
+echo "pre-commit: Python을 찾지 못해 개인 정보 검사를 건너뛰어요" >&2
+exit 0

@@ -1472,6 +1472,8 @@ SEC_KIND = {'next': (T('다음 업무'), BLUE), 'check': (T('확인 권유'), '#
 SEC_FILE = os.path.join(COLLAB, 'secretary.json')
 USER_OUT = os.path.join(COLLAB, 'out-office-user.json')   # 세션톡에서 보낸 사용자 명령 (진행 패널 mod가 배달)
 BRIEF_TEXT = T('비서 브리핑을 해 주세요 (secretary 스킬 순서대로, 마지막에 secretary.json 갱신).')
+REMOTE_NEW_DEVICE = T('새 기기가 암호로 연결됐어요 · {0}')                       # 원격: 휴대폰 알림 문구
+REMOTE_LOCKED = T('암호를 너무 많이 틀려서 1시간 동안 암호 연결을 막았어요')
 SEC_HELLO = (T('당신은 이 PC의 비서 세션입니다. secretary 스킬(~/.claude/skills/secretary/SKILL.md)을 읽고 역할을 익히세요. '
              '사용자가 세션 사무실의 [브리핑 받기] 버튼을 누르거나 직접 요청할 때만 브리핑하고, 그 전에는 아무 작업도 하지 마세요. '
              '지금은 준비됐다고 한 줄로만 답하세요.'))
@@ -3785,6 +3787,7 @@ class MeetingWin:
 
 
 CLOUDFLARED_URL = 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe'
+PW_MIN_LEN = 6   # 원격 암호 최소 길이 (office_remote.PW_MIN과 같게)
 
 
 class RemoteWin:
@@ -3818,6 +3821,13 @@ class RemoteWin:
         self.url = tk.Label(c, text='', font=F['small'], bg=CARD, fg=DIM, anchor='w', justify='left')
         self.url.pack(fill='x', pady=(6, 0))
         self.wraps.append(self.url)
+        self.share = tk.Frame(c, bg=CARD)  # 켜져 있을 때: 주소 복사
+        b = app._btn(self.share, T('주소 복사'), self.copy_address, bg=CARD, fg=ACC_TEXT, hover=HOVER)
+        b.configure(highlightbackground=ACCENT)
+        b.pack(side='left')
+        self.share_note = tk.Label(self.share, text='', font=F['small'], bg=CARD, fg=DIM, anchor='w', justify='left',
+                                   wraplength=int(440 * Z))
+        self.share_note.pack(side='left', fill='x', expand=True, padx=(10, 0))
         self.dl = tk.Frame(c, bg=CARD)  # cloudflared가 없을 때
         # 미리보기
         c = self._card(T('휴대폰 화면 미리보기'))
@@ -3838,6 +3848,21 @@ class RemoteWin:
         self.pair_btn.pack(anchor='w', pady=(10, 0))
         self.qr_box = tk.Frame(c, bg=CARD)
         self.pairing = None  # (기기 id, 띄운 시각)
+        # 암호
+        c = self._card(T('암호 잠금'))
+        self.pw_note = tk.Label(c, text='', font=F['body'], bg=CARD, fg=TEXT2, anchor='w', justify='left')
+        self.pw_note.pack(fill='x')
+        self.wraps.append(self.pw_note)
+        self.fp = tk.Label(c, text='', font=F['small'], bg=CARD, fg=DIM, anchor='w', justify='left')
+        self.fp.pack(fill='x', pady=(4, 0))
+        self.wraps.append(self.fp)
+        bar = tk.Frame(c, bg=CARD)
+        bar.pack(fill='x', pady=(10, 0))
+        self.pw_btn = app._btn(bar, '', self.ask_password, bg=CARD, fg=ACC_TEXT, hover=HOVER)
+        self.pw_btn.configure(highlightbackground=ACCENT)
+        self.pw_btn.pack(side='left')
+        self.pw_clear = app._btn(bar, T('암호 없애기'), self.clear_password)
+        self.pw_sig = None
         # 기기
         self.dev_card = self._card(T('연결된 기기'))
         self.dev_sig = None
@@ -3846,7 +3871,9 @@ class RemoteWin:
         l = tk.Label(c, font=F['small'], bg=CARD, fg=TEXT2, anchor='w', justify='left', text=T(
             '· PC가 Cloudflare 임시 터널을 바깥으로 열고, 휴대폰 웹앱은 그 주소로 들어와요. 공유기 포트를 열지 않아요.\n'
             '· 터널 주소는 켤 때마다 바뀌어서, ntfy.sh의 비밀 채널에 지금 주소를 적어 두고 휴대폰이 찾아가요.\n'
-            '· 기기마다 다른 열쇠(토큰)를 QR로 한 번만 건네요. PC에는 열쇠의 지문(해시)만 남고, 열쇠 없는 요청은 모두 거절해요.\n'
+            '· 기기마다 다른 열쇠(토큰)를 줘요. 열쇠는 QR의 한 번용 코드(10분)나, 복사한 주소로 들어와 맞힌 암호와 바꿔서만 받아요. '
+            'PC에는 열쇠의 지문(해시)만 남고, 열쇠 없는 요청은 모두 거절해요.\n'
+            '· 휴대폰은 PC의 서명을 확인한 뒤에만 열쇠·암호를 보내요. 주소가 새어 누가 가짜 서버를 세워도 그쪽으로는 보내지 않아요.\n'
             '· 세션이 확인을 기다리거나 회의 보고서가 오면 휴대폰으로 알림을 보내요 (휴대폰 앱에서 알림을 켠 경우).\n'
             '· 오가는 내용은 HTTPS로 암호화되지만 Cloudflare를 거쳐요. 쓰지 않을 땐 꺼 두세요.'))
         l.pack(fill='x')
@@ -3915,6 +3942,25 @@ class RemoteWin:
                 app.toast(T('휴대폰이 연결됐어요 · {0}').format(dev['name']))
             elif time.time() - self.pairing[1] > 600:
                 self.hide_qr(revoke=True)
+        if on and r.url:
+            self.share_note.configure(text=T('복사한 주소로 들어온 기기는 암호를 맞혀야 연결돼요.') if r.has_password
+                                      else T('주소로 새 기기를 연결하려면 먼저 암호를 정해야 해요.'))
+            if not self.share.winfo_ismapped():
+                self.share.pack(fill='x', pady=(8, 0), after=self.url)
+        elif self.share.winfo_ismapped():
+            self.share.pack_forget()
+        has_pw = bool(r and r.has_password)
+        sig = (has_pw, r.fingerprint if r else '')
+        if sig != self.pw_sig:
+            self.pw_sig = sig
+            self.pw_note.configure(text=T('암호가 걸려 있어요. 복사한 주소로 들어온 기기는 이 암호를 맞혀야 연결되고, 여러 번 틀리면 막혀요.')
+                                   if has_pw else T('암호가 없어요. 지금은 QR로만 새 기기를 연결할 수 있어요. 암호를 정하면 주소만 건네도 연결할 수 있어요.'))
+            self.fp.configure(text=T('PC 확인 코드: {0} · 휴대폰 암호 화면에 같은 코드가 보이는지 확인하세요.').format(sig[1]) if r else '')
+            self.pw_btn.configure(text=T('암호 바꾸기') if has_pw else T('암호 정하기'))
+            if has_pw and not self.pw_clear.winfo_ismapped():
+                self.pw_clear.pack(side='left', padx=6)
+            elif not has_pw:
+                self.pw_clear.pack_forget()
         self.draw_devices(force)
         if r:
             self.log.configure(text='\n'.join(r.log[-8:]) or '-')
@@ -3956,11 +4002,86 @@ class RemoteWin:
         self.app._btn(bar, T('취소'), lambda: self.hide_qr(revoke=True)).pack(side='left', padx=6)
         self.qr_box.pack(fill='x', pady=(12, 0))
 
+    def copy_address(self):
+        """지금 주소(열쇠 없음)를 복사한다. 이 주소로 들어온 기기는 암호를 맞혀야 연결된다."""
+        r = self.app.remote
+        if not (r and r.url):
+            self.app.toast(T('먼저 원격을 켜 주세요'), warn=True)
+            return
+        if not r.has_password:
+            if tkmsg.askyesno(T('주소 복사'), T('주소로 들어온 기기는 암호를 맞혀야 연결돼요.\n지금 암호를 정할까요?'), parent=self.win):
+                self.ask_password(then=self.copy_address)
+            return
+        self.win.clipboard_clear()
+        self.win.clipboard_append(r.share_link())
+        self.app.toast(T('주소를 복사했어요 · 들어온 기기는 암호를 맞혀야 연결돼요'))
+
+    def ask_password(self, then=None):
+        """암호 정하기/바꾸기 창."""
+        app, F, Z = self.app, self.app.fonts, self.app.Z
+        r = app.remote_obj()
+        d = tk.Toplevel(app.root)
+        d.title(T('암호 잠금'))
+        d.configure(bg=CARD)
+        d.resizable(False, False)
+        d.transient(app.root)
+        body = tk.Frame(d, bg=CARD, padx=24, pady=18)
+        body.pack(fill='both')
+        tk.Label(body, text=T('암호 바꾸기') if r.has_password else T('암호 정하기'), font=F['h2'], bg=CARD, fg=FG, anchor='w').pack(fill='x')
+        tk.Label(body, text=T('{0}자 이상으로 정해 주세요. 다른 곳에서 쓰는 암호는 피해 주세요.').format(PW_MIN_LEN), font=F['small'], bg=CARD,
+                 fg=DIM, anchor='w', justify='left', wraplength=int(380 * Z)).pack(fill='x', pady=(4, 10))
+        ents = []
+        for label in (T('새 암호'), T('한 번 더')):
+            tk.Label(body, text=label, font=F['small'], bg=CARD, fg=TEXT2, anchor='w').pack(fill='x')
+            e = tk.Entry(body, font=F['body'], bg=CARD2, fg=FG, relief='flat', highlightthickness=1, show='•', width=30,
+                         highlightbackground=EDGE, highlightcolor=ACCENT, insertbackground=FG)
+            e.pack(fill='x', ipady=3, pady=(2, 8))
+            ents.append(e)
+        err = tk.Label(body, text='', font=F['small'], bg=CARD, fg=RED, anchor='w')
+        err.pack(fill='x')
+
+        def save(_e=None):
+            a, b = ents[0].get(), ents[1].get()
+            if len(a) < PW_MIN_LEN:
+                err.configure(text=T('암호가 너무 짧아요'))
+                return
+            if len(a) > 128:
+                err.configure(text=T('암호가 너무 길어요'))
+                return
+            if a != b:
+                err.configure(text=T('두 암호가 달라요'))
+                return
+            r.set_password(a)
+            d.destroy()
+            devs = [x for x in r.cfg['devices'] if not x.get('preview')]
+            if devs and tkmsg.askyesno(T('암호 잠금'), T('이미 연결된 기기 {0}대는 그대로 쓸 수 있어요.\n모두 끊고 새 암호로 다시 연결하게 할까요?').format(len(devs)),
+                                       parent=self.win):
+                r.revoke_all()
+            app.toast(T('암호를 정했어요'))
+            self.pw_sig = None
+            if then:
+                then()
+
+        ents[1].bind('<Return>', save)
+        bar = tk.Frame(d, bg=CARD, padx=24)
+        bar.pack(fill='x', pady=(0, 18))
+        app._btn(bar, T('저장'), save, bg=ACCENT, fg='#ffffff', hover=ACC_DARK).pack(side='right')
+        app._btn(bar, T('취소'), d.destroy).pack(side='right', padx=8)
+        d.update_idletasks()
+        d.geometry(f'+{app.root.winfo_rootx() + 120}+{app.root.winfo_rooty() + 120}')
+        d.grab_set()
+        ents[0].focus_set()
+
+    def clear_password(self):
+        r = self.app.remote
+        if r and r.has_password and tkmsg.askyesno(
+                T('암호 잠금'), T('암호를 없앨까요?\n이미 연결된 기기는 그대로 쓰고, 주소로는 새 기기를 연결할 수 없게 돼요.'), parent=self.win):
+            r.clear_password()
+            self.pw_sig = None
+
     def hide_qr(self, revoke=False):
         if self.pairing and revoke and self.app.remote:
-            dev = next((d for d in self.app.remote.cfg['devices'] if d['id'] == self.pairing[0]), None)
-            if dev and not dev.get('seen'):  # 쓰지 않은 연결 열쇠는 없앤다
-                self.app.remote.revoke(dev['id'])
+            self.app.remote.cancel_pair(self.pairing[0])  # 쓰지 않은 한 번용 코드는 없앤다
         self.pairing = None
         self.qr_box.pack_forget()
         for x in self.qr_box.winfo_children():
@@ -3985,6 +4106,7 @@ class RemoteWin:
             row.pack(fill='x', pady=(0, 6))
             mins = int((now - d['seen']) // 60)
             seen = T('방금 접속') if mins < 1 else T('{0}분 전 접속').format(mins) if mins < 120 else T('{0}시간 전 접속').format(mins // 60)
+            seen += {'pw': T(' · 암호로 연결'), 'qr': T(' · QR로 연결')}.get(d.get('via'), '')
             tk.Label(row, text=clean(d['name'], 40), font=F['bodyb'], bg=CARD2, fg=FG).pack(side='left')
             tk.Label(row, text=seen + (T(' · 알림 켬') if d.get('push') else ''), font=F['small'], bg=CARD2, fg=DIM).pack(side='left', padx=10)
             self.app._btn(row, T('연결 끊기'), lambda i=d['id']: self.revoke(i)).pack(side='right')
