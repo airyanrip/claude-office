@@ -989,7 +989,7 @@ function drawChat(scroll) {
   chatData.msgs.forEach(m => {
     const me = m.from === 'user';
     box.append(h('div', { class: 'msg ' + (me ? 'me' : 'other') },
-      me ? null : h('div', { class: 'who', text: (m.fromLabel || '') + (room === '*' && m.toLabel ? ' → ' + m.toLabel : '') }),
+      me ? null : h('div', { class: 'who', text: (m.fromLabel || '') + (room === '*' && m.toLabel ? ' → ' + (m.to === 'user' ? t('me') : m.toLabel) : '') }),
       h('div', { class: 'b md' }, md(m.text)),
       h('div', { class: 'meta', text: (me && m.read ? t('read') + ' · ' : '') + ago(m.ts) })));
   });

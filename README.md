@@ -25,11 +25,12 @@ a KakaoTalk-style chat between sessions, and one-click session launch / resume.
   when you press **Get briefing**, then shows suggestions in a speech bubble. Each suggestion has choice
   buttons that send the task straight to the right session.
 - **SessionTalk** – a chat view of messages between sessions; type into it to give any session a command.
+  Messages show markdown like the Claude Code terminal (bold, italic, code, code blocks, lists, quotes, links).
 - **Meeting room** – invite sessions and pick the last 1/3/5/10 turns; each session writes a report of what it did
   for those requests (done / partial / not done, files, next steps) and captures its results on screen with
   [`assets/capture.ps1`](assets/capture.ps1). Invited sessions sit around a conference table; when a report arrives
   that session raises a hand and presents it line by line in a typed-out dialogue box, with its captures on the
-  projector screen. Reports are also kept as cards in the minutes and can be saved as one HTML document. (Sessions may ask permission to write the report file or run the capture script.)
+  projector screen (click a capture to view it large). Reports are also kept as cards in the minutes and can be saved as one HTML document. (Sessions may ask permission to write the report file or run the capture script.)
 - **Remote control from your phone** – a phone web app (PWA) shows the office, SessionTalk, the secretary and the
   meeting room, sends commands, starts/resumes sessions and notifies you when a session needs approval. Turn it on in
   **Remote**: the PC opens a temporary Cloudflare tunnel outward (no router setup), you connect a phone by scanning a
@@ -125,9 +126,10 @@ saved meeting documents (`session-collab/meeting/`).
 - **비서** – 다른 세션들을 살펴보고 다음 할 일을 제안하는 전용 세션. **[브리핑 받기]**를 누를 때만 일하고,
   제안의 선택지 버튼을 누르면 그 일이 해당 세션에 바로 요청돼요. 처음 실행할 때 만들지 물어봐요.
 - **세션톡** – 세션끼리 주고받은 메시지를 카톡처럼 보고, 아래 입력칸으로 세션에 직접 명령을 보내요.
+  메시지는 Claude Code 터미널처럼 굵게·기울임·코드·코드 블록·목록·인용·링크로 보여요.
 - **회의실** – 세션을 초대하고 최근 1·3·5·10턴을 고르면, 세션마다 그동안 맡은 일의 결과(완료·일부·못 함, 파일, 남은 일)를
   보고서로 정리하고 [`assets/capture.ps1`](assets/capture.ps1)로 결과 화면을 캡처해 올려요. 초대한 세션은 회의 탁자에 둘러앉고,
-  보고서가 오면 손을 든 뒤 차례로 발표해요. 대사는 타이핑되듯 나오고 캡처는 발표 스크린에 떠요. 보고서는 회의록 카드로도
+  보고서가 오면 손을 든 뒤 차례로 발표해요. 대사는 타이핑되듯 나오고 캡처는 발표 스크린에 떠요(누르면 크게 보기). 보고서는 회의록 카드로도
   남고, HTML 자료 한 장으로 저장할 수 있어요. (보고서 파일 쓰기·캡처 실행에 세션이 권한을 물을 수 있어요.)
 - **휴대폰 원격 조종** – 휴대폰 웹앱(PWA)으로 사무실·세션톡·비서·회의실을 보고 명령을 보내고, 세션을 켜고, 세션이 확인을
   기다리면 알림을 받아요. **원격** 화면에서 켜면 PC가 Cloudflare 임시 터널을 바깥으로 열고(공유기 설정 없음), 휴대폰은 QR을

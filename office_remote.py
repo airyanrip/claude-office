@@ -593,7 +593,7 @@ class Remote:
     def _new_device(self, name, via, dev_id=None):
         tok = secrets.token_urlsafe(24)
         now = int(time.time())
-        dev = {'id': dev_id or secrets.token_hex(4), 'name': _clip(name, 40) or '새 기기', 'hash': hashlib.sha256(tok.encode()).hexdigest(),
+        dev = {'id': dev_id or secrets.token_hex(4), 'name': _clip(name, 40) or getattr(self.co, 'REMOTE_DEVICE', 'New device'), 'hash': hashlib.sha256(tok.encode()).hexdigest(),
                'created': now, 'seen': now, 'push': None, 'via': via}
         if via == 'preview':
             dev['preview'] = True

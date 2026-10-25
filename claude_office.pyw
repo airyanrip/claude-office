@@ -1585,6 +1585,7 @@ SEC_FILE = os.path.join(COLLAB, 'secretary.json')
 USER_OUT = os.path.join(COLLAB, 'out-office-user.json')   # 세션톡에서 보낸 사용자 명령 (진행 패널 mod가 배달)
 BRIEF_TEXT = T('비서 브리핑을 해 주세요 (secretary 스킬 순서대로, 마지막에 secretary.json 갱신).')
 REMOTE_NEW_DEVICE = T('새 기기가 암호로 연결됐어요 · {0}')                       # 원격: 휴대폰 알림 문구
+REMOTE_DEVICE = T('새 기기')
 REMOTE_LOCKED = T('암호를 너무 많이 틀려서 1시간 동안 암호 연결을 막았어요')
 SEC_HELLO = (T('당신은 이 PC의 비서 세션입니다. secretary 스킬(~/.claude/skills/secretary/SKILL.md)을 읽고 역할을 익히세요. '
              '사용자가 세션 사무실의 [브리핑 받기] 버튼을 누르거나 직접 요청할 때만 브리핑하고, 그 전에는 아무 작업도 하지 마세요. '
@@ -2051,7 +2052,7 @@ def draw_icon(c, kind, cx, cy, s, col, bg='#ffffff', tags=()):
         round_rect(c, cx - s * 0.55, cy - s * 0.35, cx + s * 0.55, cy + s * 0.35, s * 0.14, fill=col, outline='', tags=tags)
         for dx in (-0.25, 0.25):
             c.create_line(cx + dx * s, cy - s * 0.35, cx + dx * s, cy - s * 0.85, **kw)
-        c.create_line(cx, cy + s * 0.35, cx, cy + s * 0.9, **kw)
+        c.create_line(cx, cy + s * 0.35, cx, cy + s * 0.7, **kw)
     elif kind == 'close':
         c.create_line(cx - s * 0.6, cy - s * 0.6, cx + s * 0.6, cy + s * 0.6, **kw)
         c.create_line(cx - s * 0.6, cy + s * 0.6, cx + s * 0.6, cy - s * 0.6, **kw)
@@ -5236,7 +5237,7 @@ class App:
                  ('play', T('움직임'), lambda: self.anim_on.set(not self.anim_on.get()), T('켬') if self.anim_on.get() else T('끔'), 0),
                  ('type', T('대사 속도'), self.cycle_type_speed, TYPE_SPEED_TEXT[self.type_speed()], 0),
                  ('plug', T('세션 연결 mod'), lambda: (self.toggle_menu(False), self.mod_dialog()),
-                  {'ok': T('켜짐'), 'old': T('업데이트')}.get(mod_state(), T('꺼짐')), 0),
+                  {'ok': T('켬'), 'old': T('업데이트')}.get(mod_state(), T('끔')), 0),
                  ('window', T('창으로 열기'), self.toggle_popup, T('켬') if self.popup.get() else T('끔'), 0),
                  ('moon', T('다크 테마'), self.toggle_theme, T('켬') if DARK else T('끔'), 0),
                  ('globe', T('언어'), self.pick_lang, dict(LANGS)[LANG], 0)]
@@ -5282,8 +5283,11 @@ class App:
                        outline=ACCENT if i == self.menu_hover else '', width=2 * Z)
             draw_icon(c, icon, x0 + t / 2, y0 + t * 0.38 - lift, t * 0.17, ACCENT, SURF)
             fnt = F['menu'] if F['menu'].measure(label) <= t - 12 * Z else F['tiny']  # 긴 번역은 작은 글씨, 그래도 길면 두 줄
-            c.create_text(x0 + t / 2, y0 + t * 0.72 - lift, text=label, font=fnt, fill=FG, width=t - 10 * Z, justify='center')
-            if state:
+            lt = c.create_text(x0 + t / 2, y0 + t * 0.72 - lift, text=label, font=fnt, fill=FG, width=t - 10 * Z, justify='center')
+            if state:  # 두 줄로 접힌 이름이 아래 상태 글자와 겹치지 않게 위로 올린다
+                over = c.bbox(lt)[3] - (y0 + t * 0.81 - lift)
+                if over > 0:
+                    c.move(lt, 0, -min(over, t * 0.1))
                 c.create_text(x0 + t / 2, y0 + t * 0.88 - lift, text=state, font=F['tiny'], fill=DIM)
             if badge:
                 r = 11 * Z
