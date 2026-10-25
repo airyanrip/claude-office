@@ -599,9 +599,13 @@ class Remote:
     # ── Tk 스레드에서 돌리기 ──
     def ui(self, fn, timeout=20):
         """fn을 Tk 스레드에서 돌리고 결과를 기다린다 (App의 상태는 Tk 스레드만 만진다)."""
-        box, ev = {}, threading.Event()
+        box, ev, lock = {}, threading.Event(), threading.Lock()
 
         def run():
+            with lock:
+                if box.get('gone'):  # 휴대폰은 이미 '실패'를 받았다 → 늦게라도 실행하지 않는다 (명령이 두 번 가지 않게)
+                    return
+                box['started'] = True
             try:
                 box['v'] = fn()
             except Exception as ex:  # 휴대폰에 오류로 돌려준다
@@ -610,10 +614,30 @@ class Remote:
 
         self.q.put(run)
         if not ev.wait(timeout):
-            raise TimeoutError('ui busy')
+            with lock:
+                if not box.get('started'):
+                    box['gone'] = True
+                    raise TimeoutError('ui busy')
+            ev.wait()  # 이미 시작했으면 끝까지 기다려 결과를 돌려준다
         if 'e' in box:
             raise box['e']
         return box.get('v')
+
+    def seen_req(self, key, result=None, forget=False):
+        """요청 번호 기억 (10분). result를 주면 적고, forget이면 지우고, 둘 다 아니면 처리한 적 있을 때 그 결과(없으면 None)."""
+        now = time.time()
+        with self.lock:
+            done = self.__dict__.setdefault('_done', {})
+            for k in [k for k, (t, _r) in done.items() if now - t > 600]:
+                del done[k]
+            if forget:
+                done.pop(key, None)
+                return None
+            if result is not None:
+                done[key] = (now, dict(result, repeat=True) if isinstance(result, dict) else result)
+                return result
+            hit = done.get(key)
+            return hit[1] if hit else None
 
     def pump(self):
         """Tk 쪽에서 자주 불러 큐에 쌓인 일을 처리한다."""
@@ -638,7 +662,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if origin == self.remote.app_origin:
             self.send_header('Access-Control-Allow-Origin', origin)
             self.send_header('Vary', 'Origin')
-            self.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-If-Same')
+            self.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-If-Same, X-Req-Id')
             self.send_header('Access-Control-Expose-Headers', 'X-Etag')
             self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
             self.send_header('Access-Control-Max-Age', '600')
@@ -693,15 +717,27 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         fn = API.get((method, u.path))
         if not fn:
             return self._send(404, {'error': 'not found'})
+        # 같은 요청 번호로 다시 오면(응답이 끊겨 휴대폰이 다시 보냄) 한 번만 처리하고 처음 결과를 돌려준다
+        rid = self.headers.get('X-Req-Id', '') if method == 'POST' else ''
+        rid = rid if re.fullmatch(r'[A-Za-z0-9-]{8,48}', rid) else ''
+        if rid:
+            done = self.remote.seen_req(dev['id'] + rid)
+            if done is not None:
+                return self._send(200, done)
+            self.remote.seen_req(dev['id'] + rid, {'ok': True, 'pending': True})  # 처리 중에 다시 와도 또 실행하지 않게
         try:
             res = fn(self.remote, dev, q, body)
-        except TimeoutError:
-            return self._send(503, {'error': 'busy'})
-        except ValueError as ex:
-            return self._send(400, {'error': str(ex)})
         except Exception as ex:
+            if rid:  # 실행되지 않았으니 같은 번호로 다시 보낼 수 있게 지운다
+                self.remote.seen_req(dev['id'] + rid, forget=True)
+            if isinstance(ex, TimeoutError):
+                return self._send(503, {'error': 'busy'})
+            if isinstance(ex, ValueError):
+                return self._send(400, {'error': str(ex)})
             print('remote api error', u.path, repr(ex), file=sys.stderr)
             return self._send(500, {'error': 'internal'})
+        if rid:
+            self.remote.seen_req(dev['id'] + rid, res)
         if isinstance(res, tuple):  # (바이트, 형식, 캐시)
             return self._send(200, res[0], res[1], res[2])
         self._send(200, res)

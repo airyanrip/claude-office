@@ -141,17 +141,26 @@ async function idbPut(k, v) {
 // ───────────── PC와 통신 ─────────────
 let online = false, revoked = false, pcOff = false;
 const etags = {};
-async function api(path, body, { timeout = 12000, raw = false, etag = false } = {}) {
+// 보내기(POST)마다 요청 번호를 붙인다. 실패해서 같은 내용을 다시 보내면 같은 번호를 써서, PC가 이미 처리했으면
+// 두 번 실행하지 않는다 (세션에 같은 명령이 두 번 가서 토큰을 더 쓰는 일 막기).
+const reqIds = new Map();
+async function api(path, body, { timeout = body ? 25000 : 12000, raw = false, etag = false } = {}) {
   if (!conf.u) throw new Error('no address');
   const ctl = new AbortController();
   const tm = setTimeout(() => ctl.abort(), timeout);
+  const rkey = body ? path + JSON.stringify(body) : '';
+  if (body) {
+    const old = reqIds.get(rkey);
+    if (!old || Date.now() - old[1] > 9 * 60000) reqIds.set(rkey, [crypto.getRandomValues(new Uint32Array(4)).join('-'), Date.now()]);
+  }
   try {
     const r = await fetch(conf.u + path, {
       method: body ? 'POST' : 'GET', signal: ctl.signal, cache: 'no-store', referrerPolicy: 'no-referrer',
-      headers: Object.assign({ Authorization: 'Bearer ' + conf.k }, body ? { 'Content-Type': 'application/json' } : {},
+      headers: Object.assign({ Authorization: 'Bearer ' + conf.k }, body ? { 'Content-Type': 'application/json', 'X-Req-Id': reqIds.get(rkey)[0] } : {},
         etag && etags[path] ? { 'X-If-Same': etags[path][0] } : {}),
       body: body ? JSON.stringify(body) : undefined,
     });
+    if (body && r.ok) reqIds.delete(rkey);
     if (r.status === 401) { revoked = true; throw new Error('unauthorized'); }
     if (!r.ok) {
       let msg = r.status;
