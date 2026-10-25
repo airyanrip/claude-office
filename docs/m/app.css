@@ -31,7 +31,9 @@ button { font: inherit; color: inherit; }
 .icon-btn:active { transform: scale(.94); }
 #view { padding: 14px 14px calc(86px + var(--safe-b)); max-width: 760px; margin: 0 auto; }
 .view-in { animation: viewIn .28s cubic-bezier(.2, .8, .2, 1); }
-@keyframes viewIn { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: none; } }
+.view-in.from-left { animation-name: viewInL; }
+@keyframes viewIn { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: none; } }
+@keyframes viewInL { from { opacity: 0; transform: translateX(-28px); } to { opacity: 1; transform: none; } }
 #tabs {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; display: flex; background: var(--card); border-top: 1px solid var(--edge);
   padding-bottom: var(--safe-b);
@@ -190,3 +192,41 @@ details summary { cursor: pointer; color: var(--acc-text); font-size: 13px; marg
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
 .kv b { color: var(--dim); font-weight: 400; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* ── 손가락 조작 ── */
+html { -webkit-text-size-adjust: 100%; }
+button, .tap, .room, .seat, #tabs, .talk-cur { touch-action: manipulation; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+#view { touch-action: pan-y; }
+.btn { min-height: 42px; }
+#tabs button { min-height: 58px; }
+#tabs button:active svg { transform: scale(.88); }
+.card.tap { transition: transform .12s, box-shadow .12s; }
+.card.tap:active { transform: scale(.975); box-shadow: none; }
+/* 맨 위에서 당겨 새로고침 */
+#ptr { height: 0; overflow: hidden; display: grid; place-items: center; background: var(--bg); }
+#ptr .spin { width: 22px; height: 22px; transition: transform .2s; }
+#ptr:not(.ready) .spin { animation-play-state: paused; opacity: .5; }
+/* 위에 붙는 막대 (사무실 상태 칩, 세션톡 방 목록) */
+.subbar {
+  position: sticky; top: var(--top-h, 56px); z-index: 4; background: var(--bg); margin: -14px -14px 10px; padding: 10px 14px 8px;
+  border-bottom: 1px solid transparent; transition: border-color .2s;
+}
+.subbar::after { content: ""; position: absolute; left: 0; right: 0; bottom: -8px; height: 8px; background: linear-gradient(rgba(0,0,0,.06), transparent); pointer-events: none; }
+.talk-cur { display: flex; align-items: center; gap: 8px; min-height: 40px; }
+.talk-cur .cur-img, .talk-cur .all-mini { width: 32px; height: 32px; border-radius: 10px; background: var(--mint); image-rendering: pixelated; flex: none; display: grid; place-items: center; color: var(--acc-text); font-weight: 800; }
+.fold-btn { width: 40px; height: 40px; border: 0; border-radius: 12px; background: var(--card2); display: grid; place-items: center; flex: none; }
+.fold-btn i { width: 10px; height: 10px; border-right: 2.5px solid var(--fg); border-bottom: 2.5px solid var(--fg); transform: translateY(-2px) rotate(45deg); transition: transform .28s cubic-bezier(.2, .8, .2, 1); }
+.talkbar:not(.closed) .fold-btn i { transform: translateY(2px) rotate(-135deg); }
+.rooms-wrap { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .28s cubic-bezier(.2, .8, .2, 1), opacity .2s; }
+.rooms-wrap > .rooms { overflow-x: auto; overflow-y: hidden; min-height: 0; }
+.talkbar.closed .rooms-wrap { grid-template-rows: 0fr; opacity: 0; }
+.talkbar .rooms { transition: padding .28s; }
+.talkbar.closed .rooms { padding-top: 0; padding-bottom: 0; }
+.talkbar .rooms { padding-top: 6px; }
+/* 세션톡 입력칸은 아래 탭 바 바로 위에 고정 */
+.composer.fixed { position: fixed; left: 0; right: 0; bottom: var(--tabs-h, 64px); z-index: 5; padding: 8px 12px; border-top: 1px solid var(--edge); max-width: 760px; margin: 0 auto; }
+body[data-tab="talk"] #view { padding-bottom: calc(150px + var(--safe-b)); }
+body:not([data-tab="talk"]) .composer.fixed { display: none; }
+/* 시트 위쪽(손잡이·세션·탭)은 고정 */
+.sheet-top { position: sticky; top: -8px; z-index: 2; background: var(--bg); margin: -8px -14px 0; padding: 8px 14px 2px; }
+.sheet-top .grip { width: 44px; height: 5px; }

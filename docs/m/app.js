@@ -336,12 +336,14 @@ function badge(k, n) {
   if (!el) { el = h('span', { class: 'badge' }); b.append(el); }
   el.textContent = n;
 }
-function go(k) {
+function go(k, dir) {
   if (tab === k) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+  dir = dir || (TABS.indexOf(k) > TABS.indexOf(tab) ? 1 : -1);
   tab = k;
   localStorage.setItem('co.tab', k);
+  buzz();
   markTab();
-  render();
+  render(false, dir);
   window.scrollTo(0, 0);
   if (k === 'talk') refreshChat(true);
   if (k === 'more') loadPast();
@@ -349,11 +351,13 @@ function go(k) {
 window.addEventListener('resize', markTab);
 
 // ───────────── 그리기 ─────────────
-function render(quiet) {
+function render(quiet, dir) {
   const v = $('#view');
   const keepY = window.scrollY;
   v.textContent = '';
-  v.className = quiet ? '' : 'view-in';
+  v.style.transform = ''; v.style.transition = ''; v.style.opacity = '';
+  v.className = quiet ? '' : dir < 0 ? 'view-in from-left' : 'view-in';
+  document.body.dataset.tab = online && state ? tab : '';
   if (!conf.k) return v.append(hero('🔗', t('notPaired'), t('notPairedSub')));
   if (revoked) return v.append(hero('⛔', t('revoked'), t('notPairedSub')));
   if (!online || !state) {
@@ -373,7 +377,7 @@ function chip(mode) { return h('span', { class: 'chip m-' + mode, text: t(mode) 
 function viewOffice(v) {
   const ss = state.sessions;
   const counts = ['busy', 'wait', 'idle', 'sleep'].map(m => [m, ss.filter(s => s.mode === m).length]);
-  v.append(h('div', { class: 'row', style: 'gap:6px;flex-wrap:wrap;margin:0 2px 12px' }, counts.map(([m, n]) => h('span', { class: 'chip m-' + m, text: t(m) + ' ' + n }))));
+  v.append(h('div', { class: 'subbar' }, h('div', { class: 'row', style: 'gap:6px;flex-wrap:wrap' }, counts.map(([m, n]) => h('span', { class: 'chip m-' + m, text: t(m) + ' ' + n })))));
   if (!ss.length) return v.append(h('div', { class: 'empty' }, h('b', { text: t('noSessions') })));
   const order = { wait: 0, busy: 1, idle: 2, sleep: 3 };
   [...ss].sort((a, b) => order[a.mode] - order[b.mode]).forEach((s, i) => {
@@ -395,11 +399,12 @@ function openSheet(build) {
   const sh = $('#sheet'), back = $('#sheet-back');
   sh.textContent = '';
   sh.className = '';
-  sh.append(h('div', { class: 'grip' }));
   build(sh);
   sh.hidden = false; back.hidden = false;
+  sh.style.transform = ''; sh.style.transition = '';
   back.onclick = closeSheet;
   document.body.style.overflow = 'hidden';
+  buzz();
 }
 function closeSheet() {
   const sh = $('#sheet');
@@ -407,14 +412,37 @@ function closeSheet() {
   setTimeout(() => { sh.hidden = true; $('#sheet-back').hidden = true; document.body.style.overflow = ''; }, 200);
   sheetFor = null;
 }
-let touchY = null;
-$('#sheet').addEventListener('touchstart', e => { touchY = $('#sheet').scrollTop <= 0 ? e.touches[0].clientY : null; }, { passive: true });
-$('#sheet').addEventListener('touchend', e => { if (touchY != null && e.changedTouches[0].clientY - touchY > 90) closeSheet(); touchY = null; });
+// 시트는 맨 위에서(또는 위쪽 손잡이를 잡고) 아래로 끌면 손가락을 따라 내려가고, 충분히 끌거나 빠르게 튕기면 닫힌다
+let sheetDrag = null;
+$('#sheet').addEventListener('touchstart', e => {
+  const sh = $('#sheet');
+  sheetDrag = (sh.scrollTop <= 0 || e.target.closest('.sheet-top')) && !e.target.closest('textarea, .composer, .seg')
+    ? { y: e.touches[0].clientY, t: Date.now(), dy: 0 } : null;
+}, { passive: true });
+$('#sheet').addEventListener('touchmove', e => {
+  if (!sheetDrag) return;
+  sheetDrag.dy = Math.max(0, e.touches[0].clientY - sheetDrag.y);
+  if (sheetDrag.dy > 4) {
+    e.preventDefault();
+    const sh = $('#sheet');
+    sh.style.transition = 'none';
+    sh.style.transform = `translateY(${sheetDrag.dy}px)`;
+  }
+}, { passive: false });
+$('#sheet').addEventListener('touchend', () => {
+  if (!sheetDrag) return;
+  const sh = $('#sheet'), d = sheetDrag;
+  sheetDrag = null;
+  const fast = d.dy / Math.max(1, Date.now() - d.t) > 0.6;
+  sh.style.transition = 'transform .22s cubic-bezier(.2,.8,.2,1)';
+  if (d.dy > 110 || (fast && d.dy > 30)) { sh.style.transform = 'translateY(100%)'; setTimeout(closeSheet, 200); } else sh.style.transform = '';
+});
 
 function openSession(sid) {
   sheetFor = sid;
   openSheet(sh => {
-    sh.append(h('div', { id: 'sess-head' }), segBar(['qa', 'log', 'tasks'], sheetTab, k => { sheetTab = k; fillSession(); }), h('div', { id: 'sess-body' }),
+    sh.append(h('div', { class: 'sheet-top' }, h('div', { class: 'grip' }), h('div', { id: 'sess-head' }),
+      segBar(['qa', 'log', 'tasks'], sheetTab, k => { sheetTab = k; fillSession(); })), h('div', { id: 'sess-body' }),
       composer(t('cmdPh'), async text => {
         await api('/api/send', { sid, text });
         toast(t('sent'));
@@ -442,7 +470,7 @@ function composer(ph, onSend) {
     const text = ta.value.trim();
     if (!text) return;
     btn.disabled = true;
-    try { await onSend(text); ta.value = ''; ta.style.height = ''; } catch (e) { toast(t('err', e.message === 'session is off' ? t('offSession') : e.message), true); }
+    try { await onSend(text); ta.value = ''; ta.style.height = ''; buzz(12); } catch (e) { toast(t('err', e.message === 'session is off' ? t('offSession') : e.message), true); }
     btn.disabled = false;
   };
   return h('div', { class: 'composer' }, ta, btn);
@@ -486,6 +514,7 @@ function fillSession() {
 
 // ───────────── 세션톡 ─────────────
 let room = localStorage.getItem('co.room') || '*', chatData = null, chatSig = '';
+let roomsOpen = localStorage.getItem('co.roomsOpen') !== '0', talkComposer = null, talkComposerRoom = null;
 function viewTalk(v) {
   const rooms = h('div', { class: 'rooms' });
   rooms.append(h('button', { class: 'room' + (room === '*' ? ' on' : ''), onclick: () => setRoom('*') }, h('div', { class: 'all', text: '#' }), h('span', { text: t('all') })));
@@ -494,10 +523,30 @@ function viewTalk(v) {
     sprite(s.sid, poseOf(s.mode), img);
     rooms.append(h('button', { class: 'room' + (room === s.sid ? ' on' : ''), onclick: () => setRoom(s.sid) }, img, h('span', { text: s.name })));
   });
-  v.append(rooms, h('div', { class: 'chat', id: 'chat' }));
-  if (room !== '*' && state.sessions.some(s => s.sid === room)) {
-    v.append(composer(t('talkPh'), async text => { await api('/api/send', { sid: room, text }); toast(t('sent')); refreshChat(true); }));
+  // 방 목록은 위에 고정되고, 버튼으로 접고 편다 (접어도 지금 방은 보인다)
+  const cur = state.sessions.find(s => s.sid === room);
+  const curImg = h('img', { class: 'cur-img', alt: '' });
+  if (cur) sprite(cur.sid, poseOf(cur.mode), curImg);
+  const bar = h('div', { class: 'subbar talkbar' + (roomsOpen ? '' : ' closed') });
+  const toggle = h('button', { class: 'fold-btn', 'aria-label': 'rooms', onclick: e => {
+    e.stopPropagation();
+    roomsOpen = !roomsOpen;
+    localStorage.setItem('co.roomsOpen', roomsOpen ? '1' : '0');
+    bar.classList.toggle('closed', !roomsOpen);
+    buzz();
+  } }, h('i'));
+  bar.append(h('div', { class: 'talk-cur', onclick: () => toggle.click() }, cur ? curImg : h('span', { class: 'all-mini', text: '#' }),
+    h('b', { class: 'ell grow', text: cur ? cur.name : t('all') }), toggle), h('div', { class: 'rooms-wrap' }, rooms));
+  v.append(bar, h('div', { class: 'chat', id: 'chat' }));
+  if (cur) {
+    if (!talkComposer || talkComposerRoom !== room) {  // 다시 그려도 쓰던 글이 지워지지 않게 같은 입력칸을 쓴다
+      talkComposerRoom = room;
+      talkComposer = composer(t('talkPh'), async text => { await api('/api/send', { sid: talkComposerRoom, text }); toast(t('sent')); refreshChat(true); });
+      talkComposer.classList.add('fixed');
+    }
+    if (talkComposer.parentNode !== document.body) document.body.append(talkComposer);
   } else {
+    if (talkComposer) { talkComposer.remove(); talkComposer = null; }
     v.append(h('div', { class: 'small', style: 'text-align:center;padding:10px', text: t('pickRoom') }));
   }
   drawChat();
@@ -646,6 +695,7 @@ function drawStage(m, st = $('#stage')) {
 }
 function dialog(m) {
   const box = h('div', { class: 'dialog', id: 'dialog', onclick: () => advance() });
+  swipeX(box, dir => (dir > 0 ? back() : advance()));
   box.append(h('span', { class: 'tag sys', id: 'dlg-tag' }), h('div', { class: 'txt', id: 'dlg-txt' }), h('div', { class: 'nav' }, h('span', { id: 'dlg-pg' }), h('span', { class: 'more', id: 'dlg-more', hidden: true, text: '▼' })));
   requestAnimationFrame(() => { if (!talk.sid) sysLine(m); else showPage(true); });
   return box;
@@ -706,6 +756,9 @@ function typeOut(text) {
     talk.timer = setTimeout(step, Math.max(1, base * typeScale()));
   };
   step();
+}
+function back() {
+  if (talk.sid && talk.pi > 0) { talk.pi--; showPage(); buzz(); }
 }
 function advance() {
   if (talk.n < talk.text.length) { clearTimeout(talk.timer); talk.n = talk.text.length; $('#dlg-txt').textContent = talk.text; $('#dlg-more').hidden = !talk.sid; return; }
@@ -804,6 +857,81 @@ async function pushOff() {
     await api('/api/push', { sub: null });
   } catch (e) { /* 연결이 끊겨 있어도 이 기기에서는 끈다 */ }
 }
+
+// ───────────── 손가락 조작 ─────────────
+function buzz(ms = 8) { try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) { /* 진동이 없는 기기 */ } }
+function swipeX(el, onSwipe) {  // 좌우로 넘기기 (dir: 오른쪽으로 넘기면 +1)
+  let s = null;
+  el.addEventListener('touchstart', e => { s = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now() }; }, { passive: true });
+  el.addEventListener('touchend', e => {
+    if (!s) return;
+    const dx = e.changedTouches[0].clientX - s.x, dy = e.changedTouches[0].clientY - s.y;
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) { e.preventDefault(); onSwipe(dx > 0 ? 1 : -1); }
+    s = null;
+  });
+}
+// 화면을 좌우로 넘기면 옆 탭으로 (손가락을 따라 움직이고, 맨 끝 탭에서는 버티듯 덜 움직인다).
+// 맨 위에서 아래로 당기면 새로고침. 가로로 굴리는 목록·입력칸·대사창에서는 끼어들지 않는다.
+(function gestures() {
+  const view = $('#view'), ptr = $('#ptr');
+  let g = null;
+  const skip = '.rooms, .thumbs, .chips, .pick, textarea, input, select, .dialog, .seg, .composer';
+  document.addEventListener('touchstart', e => {
+    if (!online || !state || !$('#sheet').hidden || e.touches.length > 1 || e.target.closest('#tabs, #top') || e.target.closest(skip)) { g = null; return; }
+    g = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now(), mode: null, dx: 0, dy: 0, top: window.scrollY <= 0 };
+  }, { passive: true });
+  document.addEventListener('touchmove', e => {
+    if (!g) return;
+    g.dx = e.touches[0].clientX - g.x;
+    g.dy = e.touches[0].clientY - g.y;
+    if (!g.mode && Math.hypot(g.dx, g.dy) > 10) g.mode = Math.abs(g.dx) > Math.abs(g.dy) * 1.2 ? 'x' : (g.top && g.dy > 0 && tab !== 'talk' ? 'pull' : 'y');
+    if (g.mode === 'x') {
+      e.preventDefault();
+      const i = TABS.indexOf(tab), edge = (g.dx > 0 && i === 0) || (g.dx < 0 && i === TABS.length - 1);
+      view.style.transition = 'none';
+      view.style.transform = `translateX(${g.dx * (edge ? 0.25 : 0.9)}px)`;
+      view.style.opacity = String(1 - Math.min(0.35, Math.abs(g.dx) / 900));
+    } else if (g.mode === 'pull') {
+      e.preventDefault();
+      const d = Math.min(90, g.dy * 0.45);
+      ptr.style.height = d + 'px';
+      ptr.classList.toggle('ready', d > 58);
+    }
+  }, { passive: false });
+  document.addEventListener('touchend', () => {
+    if (!g) return;
+    const d = g;
+    g = null;
+    if (d.mode === 'x') {
+      const i = TABS.indexOf(tab), next = i + (d.dx < 0 ? 1 : -1);
+      const fast = Math.abs(d.dx) / Math.max(1, Date.now() - d.t) > 0.45;
+      if ((Math.abs(d.dx) > 80 || (fast && Math.abs(d.dx) > 30)) && next >= 0 && next < TABS.length) {
+        view.style.transition = 'transform .16s ease-in, opacity .16s';
+        view.style.transform = `translateX(${d.dx < 0 ? -120 : 120}px)`;
+        view.style.opacity = '0';
+        setTimeout(() => go(TABS[next], d.dx < 0 ? 1 : -1), 140);
+      } else {
+        view.style.transition = 'transform .25s cubic-bezier(.2,.8,.2,1), opacity .25s';
+        view.style.transform = '';
+        view.style.opacity = '';
+      }
+    } else if (d.mode === 'pull') {
+      const go_ = ptr.classList.contains('ready');
+      ptr.style.transition = 'height .25s';
+      ptr.style.height = go_ ? '46px' : '0';
+      if (go_) { buzz(); stateSig = ''; poll().finally(() => { ptr.style.height = '0'; ptr.classList.remove('ready'); }); }
+      setTimeout(() => { ptr.style.transition = ''; }, 300);
+    }
+  }, { passive: true });
+  // 위쪽·아래쪽 고정 막대 높이를 알려 고정 위치를 맞춘다
+  const fit = () => {
+    document.documentElement.style.setProperty('--top-h', $('#top').offsetHeight + 'px');
+    document.documentElement.style.setProperty('--tabs-h', $('#tabs').offsetHeight + 'px');
+  };
+  new ResizeObserver(fit).observe($('#top'));
+  new ResizeObserver(fit).observe($('#tabs'));
+  fit();
+})();
 
 // ───────────── 시작 ─────────────
 $('#refresh-btn').onclick = () => { stateSig = ''; online ? poll() : connect(); };
