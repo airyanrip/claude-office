@@ -1555,6 +1555,75 @@ def mix(a, b, t):
     return '#%02x%02x%02x' % tuple(int(x + (y - x) * t) for x, y in zip(ca, cb))
 
 
+def ease_out(t):
+    return 1 - (1 - t) ** 3
+
+
+def ease_in_out(t):
+    return t * t * (3 - 2 * t)
+
+
+def ease_back(t):  # 살짝 지나쳤다가 제자리 (튀어나오는 것)
+    c = 1.4
+    return 1 + (c + 1) * (t - 1) ** 3 + c * (t - 1) ** 2
+
+
+def mix_any(a, b, t):
+    """mix인데 '#rrggbb'가 아닌 색 이름이 섞여 있으면 끝 색으로."""
+    if not (isinstance(a, str) and isinstance(b, str) and len(a) == 7 == len(b) and a[0] == b[0] == '#'):
+        return b if t >= 1 else a
+    return mix(a, b, t)
+
+
+class Tweens:
+    """시간 기준 애니메이션 (프레임이 밀려도 정해진 시간 안에 끝난다). 같은 key로 새로 부르면 앞의 것은 그 자리에서 멈추고
+    새 것이 이어받는다. 설정에서 움직임을 끄면 바로 마지막 모습으로."""
+
+    def __init__(self, root, on):
+        self.root, self.on, self.jobs = root, on, {}
+
+    def run(self, ms, step, done=None, ease=ease_out, key=None):
+        token = object()
+        if key is not None:
+            self.jobs[key] = token
+        if ms <= 0 or not self.on():
+            self._end(key, token, step, done, 1.0)
+            return
+        t0 = time.perf_counter()
+
+        def tick():
+            if key is not None and self.jobs.get(key) is not token:
+                return
+            p = min(1.0, (time.perf_counter() - t0) * 1000 / ms)
+            if p >= 1:
+                self._end(key, token, step, done, 1.0)
+                return
+            try:
+                step(ease(p))
+            except tk.TclError:  # 위젯이 사라짐
+                self.jobs.pop(key, None)
+                return
+            self.root.after(15, tick)
+
+        tick()
+
+    def _end(self, key, token, step, done, p):
+        if key is not None and self.jobs.get(key) is token:
+            del self.jobs[key]
+        try:
+            step(p)
+            if done:
+                done()
+        except tk.TclError:
+            pass
+
+    def busy(self, key):
+        return key in self.jobs
+
+    def stop(self, key):
+        self.jobs.pop(key, None)
+
+
 def gradient(c, x0, y0, x1, y1, c0, c1, tags=(), step=3):
     """가로 그라데이션 띠 (캔버스 픽셀 좌표)."""
     w = max(1, int(x1 - x0))
@@ -1677,9 +1746,13 @@ class PageHost(tk.Frame):
     """메뉴 기능을 별도 창 대신 사무실 화면 자리에 띄우는 틀. 창(Toplevel)처럼 불러도 되게 창 전용 메서드는 받아 넘긴다."""
 
     def __init__(self, app, key):
-        super().__init__(app.page_wrap, bg=BG)
+        super().__init__(app.page_slot, bg=BG)
         self.app, self.key = app, key
-        self.pack(fill='both', expand=True)
+        # 오른쪽에서 살짝 밀려 들어온다 (안쪽 위젯은 통째로 따라 움직여 다시 배치하지 않는다).
+        # 화면을 다 만든 뒤(after_idle)에 시작해야 무거운 화면도 미끄러지는 모습이 보인다
+        self.place(x=int(56 * app.Z), y=0, relwidth=1, relheight=1)
+        app.root.after_idle(lambda: self.winfo_exists() and app.tw.run(
+            280, lambda e: self.place_configure(x=int(56 * app.Z * (1 - e))), ease=ease_out, key='page'))
 
     def title(self, text=None):
         if text:
@@ -2737,8 +2810,126 @@ class LaunchWin:
             it['btn'].unbind('<Leave>')
 
 
+class Fold:
+    """접고 펼치는 칸. 머리(▸ 제목)를 누르면 몸이 서랍처럼 부드럽게 열리고 닫힌다. 몸(body)은 clip 안에 place로 얹어
+    높이를 줄여도 내용이 찌그러지지 않고 잘려 보이게 한다."""
+
+    def __init__(self, app, parent, title, open_=True):
+        F, Z = app.fonts, app.Z
+        self.app, self.is_open = app, open_
+        self.outer = tk.Frame(parent, bg=CARD, highlightthickness=1, highlightbackground=EDGE)
+        self.head = tk.Frame(self.outer, bg=CARD, padx=14, pady=10, cursor='hand2')
+        self.head.pack(fill='x')
+        self.chev = tk.Canvas(self.head, width=int(14 * Z), height=int(14 * Z), bg=CARD, highlightthickness=0, cursor='hand2')
+        self.chev.pack(side='left', padx=(0, 8))
+        self.title = tk.Label(self.head, text=title, font=F['h2'], bg=CARD, fg=FG, cursor='hand2')
+        self.title.pack(side='left')
+        self.sub = tk.Label(self.head, text='', font=F['small'], bg=CARD, fg=DIM, cursor='hand2')
+        self.sub.pack(side='left', padx=10)
+        self.tools = tk.Frame(self.head, bg=CARD)  # 오른쪽 버튼 자리 (눌러도 접히지 않는다)
+        self.tools.pack(side='right')
+        for w in (self.head, self.chev, self.title, self.sub):
+            w.bind('<Button-1>', lambda e: self.toggle())
+            w.bind('<Enter>', lambda e: self._chev(self.ang, ACCENT))
+            w.bind('<Leave>', lambda e: self._chev(self.ang, DIM))
+        self.clip = tk.Frame(self.outer, bg=CARD, height=1)
+        self.clip.pack_propagate(False)
+        self.body = tk.Frame(self.clip, bg=CARD, padx=16, pady=2)
+        self.body.place(x=0, y=0, relwidth=1)
+        self.body.bind('<Configure>', lambda e: self._fit())
+        self.ang = 90 if open_ else 0
+        if open_:
+            self.clip.pack(fill='x', pady=(0, 12))
+        self._chev(self.ang, DIM)
+
+    def _chev(self, ang, col):
+        c, s = self.chev, int(self.chev['width'])
+        c.delete('all')
+        a = math.radians(ang)
+        pts = []
+        for px, py in ((-0.25, -0.38), (0.3, 0), (-0.25, 0.38)):  # ▸ 를 ang만큼 돌린다 (90° = ▾)
+            pts += [s / 2 + (px * math.cos(a) - py * math.sin(a)) * s, s / 2 + (px * math.sin(a) + py * math.cos(a)) * s]
+        c.create_line(*pts, fill=col, width=max(2, s / 7), capstyle='round', joinstyle='round')
+
+    def _fit(self):
+        if self.is_open and not self.app.tw.busy(('fold', str(self.outer))):
+            h = self.body.winfo_reqheight()
+            if abs(int(self.clip['height']) - h) > 1:
+                self.clip.configure(height=h)
+
+    def toggle(self, open_=None):
+        open_ = (not self.is_open) if open_ is None else open_
+        if open_ == self.is_open:
+            return
+        self.is_open = open_
+        self.outer.update_idletasks()
+        full = max(1, self.body.winfo_reqheight())
+        start = self.clip.winfo_height() if self.clip.winfo_ismapped() else 1
+        goal = full if open_ else 1
+        a0, a1 = self.ang, (90 if open_ else 0)
+        self.clip.configure(height=start)
+        self.clip.pack(fill='x', pady=(0, 12))
+
+        def step(e):
+            h = max(1, int(start + (goal - start) * e))
+            self.clip.configure(height=h)
+            self.body.place_configure(y=h - full)  # 내용이 위에서 내려오며 드러난다
+            self.ang = a0 + (a1 - a0) * e
+            self._chev(self.ang, DIM)
+
+        def done():
+            self.body.place_configure(y=0)
+            if not self.is_open:
+                self.clip.pack_forget()
+            else:
+                self._fit()
+
+        ms = int((280 if open_ else 220) * min(1.0, 0.5 + full / 900))  # 긴 칸은 조금 더 천천히
+        self.app.tw.run(ms, step, done, ease=ease_in_out, key=('fold', str(self.outer)))
+
+
+MW = {  # 회의실 그림 색
+    'wall': _t('#eef6f1', '#1b2420'), 'wains': _t('#dcece3', '#17201c'), 'rail': _t('#ffffff', '#2f4a40'),
+    'floor': _t('#eadfce', '#29231d'), 'plank': _t('#dfd1bc', '#231e19'), 'rug': _t('#cfe8dc', '#1f3a31'),
+    'rug_edge': _t('#b7dcc9', '#2a4d41'), 'table': _t('#c99a6b', '#7a5b3f'), 'table_hi': _t('#d8ad80', '#8a6a4b'),
+    'table_edge': _t('#9a6f48', '#4f3a28'), 'leg': _t('#7d5a3a', '#3d2d20'), 'chair': _t('#5f8a78', '#2f4a40'),
+    'chair_hi': _t('#76a08d', '#3d5d50'), 'frame': _t('#3a4450', '#0b0e12'), 'screen': _t('#ffffff', '#1a2129'),
+    'board': _t('#ffffff', '#e4e9ec'), 'board_ink': _t('#3b4651', '#2a333c'), 'board_edge': _t('#c9d3da', '#9aa6b0'),
+    'sky': _t('#bfe3ff', '#20344d'), 'sky2': _t('#e6f4ff', '#2b4563'), 'spot': _t('#fff5d1', '#3b3622'),
+    'paper': _t('#ffffff', '#dfe5ea'), 'cup': _t('#ffffff', '#cfd6dc'), 'pot': _t('#ffffff', '#2a333d'),
+    'leaf': _t('#56b98c', '#3f8f6b'), 'leaf2': _t('#3fa577', '#2f7556'), 'plate': _t('#ffffff', '#26303a'),
+}
+MEET_SEAT = {'busy': ('…', '#5b9ee8'), 'wait': ('?', '#f0a020'), 'ready': ('!', '#2fb985'), 'done': ('✓', '#8a96a3'),
+             'off': ('z', '#9a86c8')}
+
+
+def wrap_text(text, font, px):
+    """글자 폭에 맞춰 줄을 나눈다 (띄어쓰기가 있으면 그 자리에서, 없으면 글자 단위)."""
+    out = []
+    for para in str(text).split('\n'):
+        line = ''
+        for ch in para:
+            if font.measure(line + ch) <= px:
+                line += ch
+                continue
+            cut = line.rfind(' ')
+            if cut > len(line) * 0.5:
+                out.append(line[:cut])
+                line = line[cut + 1:] + ch
+            else:
+                out.append(line)
+                line = ch
+        out.append(line)
+    return out
+
+
 class MeetingWin:
-    """회의실: 세션을 골라 초대하고 최근 N턴의 작업 결과를 보고받는다. 세션이 쓴 보고서·캡처를 카드로 모아 보여 준다."""
+    """회의실: 세션을 골라 초대하고 최근 N턴의 작업 결과를 보고받는다. 위쪽은 회의 장면(탁자에 둘러앉은 세션, 발표 스크린,
+    대사 창), 아래는 '회의 준비'와 '회의록' 접는 칸. 보고서가 오면 그 세션이 손을 들고, 차례로 일어나 발표하듯 대사가
+    타이핑되어 나온다."""
+
+    TYPE_MS = 28  # 한 글자 (초당 약 35자)
+    PAUSE = {'.': 260, '!': 260, '?': 260, '。': 260, '！': 260, '？': 260, '\n': 220, ',': 110, '，': 110, '、': 110}
 
     def __init__(self, app):
         self.app = app
@@ -2746,10 +2937,14 @@ class MeetingWin:
         self.win = w = app.make_host('meet')
         w.title(T('회의실 · Claude Office'))
         w.configure(bg=BG)
-        w.geometry(f'{int(900 * Z)}x{int(780 * Z)}')
-        w.minsize(640, 480)
-        grad_head(w, app, 'meet', T('회의실'),
-                  T('세션을 초대해 최근 작업을 보고받아요. 세션이 결과를 정리하고 화면을 캡처해 보고서를 올려요.')).pack(fill='x')
+        w.geometry(f'{int(980 * Z)}x{int(860 * Z)}')
+        w.minsize(680, 560)
+        self.scene = tk.Canvas(w, height=int(380 * Z), bg=MW['wall'], highlightthickness=0)
+        self.scene.pack(fill='x')
+        self.scene.bind('<Configure>', lambda e: self.draw_scene())
+        for k in ('<space>', '<Return>', '<Right>'):
+            self.scene.bind(k, lambda e: self.next())
+        self.scene.bind('<Left>', lambda e: self.prev())
         holder = tk.Frame(w, bg=BG, padx=14)
         holder.pack(fill='both', expand=True, pady=(10, 12))
         self.cv, self.inner = scroll_frame(holder, BG)
@@ -2757,10 +2952,24 @@ class MeetingWin:
         self.cv.bind('<Configure>', lambda e: self._wrap(e.width), add='+')
         self.pick = set(app.cfg.get('meet_pick') or [])
         self.turns = app.cfg.get('meet_turns') if app.cfg.get('meet_turns') in MEET_TURNS else 3
-        self.faces, self.thumbs, self.wraps = {}, {}, []
-        self.sig = None
-        self.build()
-        self._tick()
+        self.faces, self.thumbs, self.sprites, self.wraps = {}, {}, {}, []
+        m = self.meeting()
+        self.presented = set((m or {}).get('presented') or [])
+        self.f_setup = Fold(app, self.inner, T('회의 준비'), open_=not m)
+        self.f_setup.outer.pack(fill='x', pady=(0, 10))
+        self.f_min = Fold(app, self.inner, T('회의록'), open_=True)
+        self.f_min.outer.pack(fill='x')
+        self.setup_sig = self.min_sig = self.scene_sig = None
+        self.seated = set()      # 이미 자리에 앉은 세션 (새로 온 세션만 일어서는 연출)
+        self.pop_off = {}        # 일어나는 중인 세션의 남은 높이
+        self.known = None        # 보고서가 온 세션 (새로 오면 회의록 카드를 반짝)
+        self.roster = []
+        self.speaker, self.pages, self.pi = None, [], 0
+        self.ty = {'text': '', 'n': 0, 'job': None}
+        self.ph = 0
+        self.refresh()
+        self._loop()
+        self._anim_tick()
 
     # ── 상태 ──
     def meeting(self):
@@ -2780,38 +2989,265 @@ class MeetingWin:
         with app.mon.lock:
             return [(s.sid, app.mon.display_name(s), s.mode()) for s in app.sessions if s.sid in app.mon.sessions]
 
-    def _sig(self):
-        m = self.meeting()
-        files = ()
-        if m:
-            d = self.folder(m)
-            try:
-                files = tuple(sorted((e.name, e.stat().st_mtime) for e in os.scandir(d)))
-            except OSError:
-                pass
-        return (json.dumps(m, sort_keys=True) if m else '', files, tuple(self.live()), tuple(sorted(self.pick)), self.turns)
+    def make_roster(self, m):
+        """회의 자리: [{sid, name, mode, report, state}] — state = guest/off/busy/wait/ready/talk/done."""
+        app = self.app
+        with app.mon.lock:
+            alive = {sid: (app.mon.display_name(s), s.mode()) for sid, s in app.mon.sessions.items()}
+        order = [sid for sid, _n, _m in self.live()]
+        sids = m['members'] if m else [sid for sid in order if sid in self.pick]
+        names = (m or {}).get('names') or {}
+        out = []
+        for sid in sids[:12]:
+            name, mode = alive.get(sid, (names.get(sid) or sid[:8], None))
+            r = self.report(m, sid) if m else None
+            if not m:
+                st = 'guest'
+            elif r:
+                st = 'talk' if sid == self.speaker else 'done' if sid in self.presented else 'ready'
+            elif mode is None:
+                st = 'off'
+            else:
+                st = 'busy' if mode == 'busy' else 'wait'
+            out.append({'sid': sid, 'name': name, 'mode': mode, 'report': r, 'state': st})
+        return out
 
-    def _tick(self):
+    def refresh(self):
         if not self.win.winfo_exists():
             return
-        sig = self._sig()
-        if sig != self.sig:
-            self.build()
-        self.win.after(1500, self._tick)
+        m = self.meeting()
+        self.roster = self.make_roster(m)
+        live = self.live()
+        self.pick &= {sid for sid, _n, _m in live}
+        sig = (tuple(live), m is not None, self.app.Z)
+        if sig != self.setup_sig:
+            self.setup_sig = sig
+            self.build_setup(m, live)
+        else:
+            self.f_setup.sub.configure(text=T('{0}명 선택').format(len(self.pick)))
+        files = ()
+        if m:
+            try:
+                files = tuple(sorted((e.name, e.stat().st_mtime) for e in os.scandir(self.folder(m))))
+            except OSError:
+                pass
+        mm = {k: v for k, v in (m or {}).items() if k != 'presented'}
+        sig = (json.dumps(mm, sort_keys=True), files, tuple((r['sid'], r['name'], r['mode']) for r in self.roster), self.speaker)
+        if sig != self.min_sig:
+            self.min_sig = sig
+            self.build_minutes(m)
+        # 보고서가 온 세션이 있는데 발표 중이 아니면 차례로 발표를 시작한다
+        if m and self.speaker is None:
+            nxt = next((r for r in self.roster if r['state'] == 'ready'), None)
+            if nxt:
+                self.present(nxt['sid'])
+                return
+        if self.speaker is None:
+            self.say_system(m)
+        sig = (tuple((r['sid'], r['state'], r['name']) for r in self.roster), self.speaker)
+        if sig != self.scene_sig:
+            self.draw_scene()
 
-    def _wrap(self, width):
-        for l in self.wraps:
-            l.configure(wraplength=max(240, width - 80))
+    def _loop(self):
+        if not self.win.winfo_exists():
+            return
+        self.refresh()
+        self.win.after(1200, self._loop)
 
-    def face(self, sid):
-        if sid not in self.faces:
-            self.faces[sid] = make_frames(sid, 2.2 * self.app.Z, self.app.avatars.get(sid))[0]['idle']
-        return self.faces[sid]
+    # ── 회의 장면 ──
+    def sprite(self, sid):
+        if sid not in self.sprites:
+            self.sprites[sid] = make_frames(sid, 4.4 * self.app.Z, self.app.avatars.get(sid))
+        return self.sprites[sid]
 
-    def thumb(self, path, width):
-        """캡처 미리보기 (가로 width px 이하로 정수배 줄임). 못 읽으면 None."""
+    def draw_scene(self):
+        c, Z, F = self.scene, self.app.Z, self.app.fonts
+        W, H = c.winfo_width(), c.winfo_height()
+        if W < 100:
+            return
+        self.scene_sig = (tuple((r['sid'], r['state'], r['name']) for r in self.roster), self.speaker)
+        c.delete('all')
+        self.seat_items = {}
+        wall_h = int(H * 0.48)
+        self.geo = g = {'W': W, 'H': H, 'wall': wall_h}
+        # 벽·바닥
+        c.create_rectangle(0, 0, W, wall_h, fill=MW['wall'], outline='')
+        c.create_rectangle(0, wall_h - 24 * Z, W, wall_h, fill=MW['wains'], outline='')
+        c.create_line(0, wall_h - 24 * Z, W, wall_h - 24 * Z, fill=MW['rail'], width=max(2, int(3 * Z)))
+        c.create_rectangle(0, wall_h, W, H, fill=MW['floor'], outline='')
+        for i in range(1, 6):
+            y = wall_h + (H - wall_h) * i / 6
+            c.create_line(0, y, W, y, fill=MW['plank'])
+        c.create_oval(W * 0.08, wall_h + 2 * Z, W * 0.92, wall_h + (H - wall_h) * 0.66, fill=MW['rug'], outline=MW['rug_edge'],
+                      width=max(1, int(2 * Z)))
+        # 발표 스크린 (가운데), 안건 화이트보드 (왼쪽), 창문·화분 (오른쪽)
+        sw = min(W * 0.36, 360 * Z)
+        sx0, sy0, sx1, sy1 = W / 2 - sw / 2, 12 * Z, W / 2 + sw / 2, wall_h - 50 * Z
+        c.create_line(W / 2, 0, W / 2, sy0, fill=MW['frame'], width=max(2, int(2 * Z)))
+        round_rect(c, sx0 - 6 * Z, sy0 - 6 * Z, sx1 + 6 * Z, sy1 + 6 * Z, 6 * Z, fill=MW['frame'])
+        c.create_rectangle(sx0, sy0, sx1, sy1, fill=MW['screen'], outline='')
+        g['scr'] = (sx0, sy0, sx1, sy1)
+        side = (W - sw) / 2 - 56 * Z
+        if side > 120 * Z:
+            bw = min(200 * Z, side)
+            bx0, by0, bx1, by1 = 34 * Z, 22 * Z, 34 * Z + bw, wall_h - 46 * Z
+            round_rect(c, bx0 - 4 * Z, by0 - 4 * Z, bx1 + 4 * Z, by1 + 4 * Z, 5 * Z, fill=MW['board_edge'])
+            c.create_rectangle(bx0, by0, bx1, by1, fill=MW['board'], outline='')
+            c.create_rectangle(bx0 + 10 * Z, by1 + 4 * Z, bx1 - 10 * Z, by1 + 8 * Z, fill=MW['board_edge'], outline='')
+            g['board'] = (bx0, by0, bx1, by1)
+            wx1 = W - 34 * Z
+            wx0 = wx1 - min(170 * Z, side)
+            round_rect(c, wx0 - 5 * Z, 20 * Z, wx1 + 5 * Z, wall_h - 40 * Z, 4 * Z, fill=MW['rail'])
+            c.create_rectangle(wx0, 25 * Z, wx1, wall_h - 45 * Z, fill=MW['sky'], outline='')
+            c.create_rectangle(wx0, 25 * Z, wx1, (25 + 22) * Z, fill=MW['sky2'], outline='')
+            c.create_line((wx0 + wx1) / 2, 25 * Z, (wx0 + wx1) / 2, wall_h - 45 * Z, fill=MW['rail'], width=max(2, int(4 * Z)))
+            px = wx1 - 14 * Z  # 화분
+            for dx, dy, r, col in ((-10, -40, 16, 'leaf2'), (8, -46, 15, 'leaf'), (0, -58, 13, 'leaf')):
+                c.create_oval(px + (dx - r) * Z, wall_h + (dy - r) * Z, px + (dx + r) * Z, wall_h + (dy + r) * Z, fill=MW[col], outline='')
+            round_rect(c, px - 16 * Z, wall_h - 30 * Z, px + 16 * Z, wall_h + 6 * Z, 5 * Z, fill=MW['pot'], outline=EDGE)
+        # 탁자와 자리
+        n = len(self.roster)
+        seat_w = min(126 * Z, (W * 0.84 - 60 * Z) / max(1, n))
+        tw = max(n * seat_w + 60 * Z, W * 0.42)
+        tx0, tx1 = (W - tw) / 2, (W + tw) / 2
+        ty0 = wall_h + 30 * Z
+        ty1 = ty0 + 32 * Z
+        g['seats'] = {}
+        sc = max(1, int(round(4.4 * Z * 16 / SW)))
+        for i, r in enumerate(self.roster):
+            x = (W - n * seat_w) / 2 + seat_w * (i + 0.5)
+            g['seats'][r['sid']] = x
+            if r['state'] == 'talk':  # 발표자 뒤 조명
+                c.create_oval(x - 56 * Z, ty0 - 96 * Z, x + 56 * Z, ty0 + 6 * Z, fill=MW['spot'], outline='')
+            round_rect(c, x - 32 * Z, ty0 - 72 * Z, x + 32 * Z, ty0 + 4 * Z, 12 * Z, fill=MW['chair'])
+            c.create_rectangle(x - 22 * Z, ty0 - 64 * Z, x + 22 * Z, ty0 - 60 * Z, fill=MW['chair_hi'], outline='')
+            frames = self.sprite(r['sid'])[0]
+            pose = self.pose(r, 0)
+            tag = f's{i}'
+            img = c.create_image(x, ty0 + 16 * Z, image=frames[pose], anchor='s', tags=(tag, 'pop' + r['sid']))
+            top = ty0 + 16 * Z - SH * sc
+            b = MEET_SEAT.get(r['state'])
+            bub = txt = None
+            if b:
+                bub = c.create_oval(x + 10 * Z, top - 6 * Z, x + 30 * Z, top + 14 * Z, fill=b[1], outline='#ffffff',
+                                    width=max(1, int(1.5 * Z)), tags=(tag + 'b', 'pop' + r['sid']))
+                txt = c.create_text(x + 20 * Z, top + 4 * Z, text=b[0], font=F['tiny'], fill='#ffffff', tags=(tag + 'b', 'pop' + r['sid']))
+            self.seat_items[r['sid']] = {'img': img, 'pose': pose, 'bub': bub, 'txt': txt, 'bob': 0, 'r': r}
+            for it in (img,):
+                c.tag_bind(it, '<Button-1>', lambda e, s=r['sid']: self.present(s, user=True))
+        # 탁자 (사람 아랫몸을 가린다)
+        round_rect(c, tx0, ty0, tx1, ty1, 12 * Z, fill=MW['table'], outline=MW['table_edge'], width=max(1, int(Z)))
+        c.create_line(tx0 + 14 * Z, ty0 + 6 * Z, tx1 - 14 * Z, ty0 + 6 * Z, fill=MW['table_hi'], width=max(1, int(2 * Z)))
+        c.create_rectangle(tx0 + 8 * Z, ty1, tx1 - 8 * Z, ty1 + 10 * Z, fill=MW['table_edge'], outline='')
+        for lx in (tx0 + 26 * Z, tx1 - 26 * Z):
+            c.create_rectangle(lx - 4 * Z, ty1 + 10 * Z, lx + 4 * Z, ty1 + 26 * Z, fill=MW['leg'], outline='')
+        for r in self.roster:
+            x = g['seats'][r['sid']]
+            c.create_rectangle(x - 22 * Z, ty0 + 9 * Z, x - 4 * Z, ty0 + 22 * Z, fill=MW['paper'], outline=EDGE)
+            for k in range(3):
+                c.create_line(x - 19 * Z, ty0 + (12 + k * 3) * Z, x - 8 * Z, ty0 + (12 + k * 3) * Z, fill=EDGE)
+            c.create_oval(x + 8 * Z, ty0 + 10 * Z, x + 18 * Z, ty0 + 20 * Z, fill=MW['cup'], outline=EDGE)
+            pw = min(seat_w - 12 * Z, 104 * Z)
+            on = r['state'] == 'talk'
+            round_rect(c, x - pw / 2, ty1 - 3 * Z, x + pw / 2, ty1 + 15 * Z, 4 * Z, fill=ACCENT if on else MW['plate'],
+                       outline=ACCENT if on else EDGE)
+            c.create_text(x, ty1 + 6 * Z, text=fit(r['name'], F['tiny'], pw - 8 * Z), font=F['tiny'],
+                          fill='#ffffff' if on else FG)
+        if not self.roster:
+            c.create_text(W / 2, ty0 + 16 * Z, text=T('빈 회의실'), font=F['bodyb'], fill=MW['table_edge'])
+        # 새로 온 세션은 탁자 뒤에서 일어나 앉는다. 올라오는 도중에 다시 그려도 지금 높이(pop_off)에서 이어진다
+        new = [r['sid'] for r in self.roster if r['sid'] not in self.seated]
+        for k, sid in enumerate(new):
+            self.pop_off[sid] = 34 * Z
+            self._pop(sid, 34 * Z, k * 90)
+        for sid, off in self.pop_off.items():
+            if off:
+                c.move('pop' + sid, 0, off)
+        self.seated = {r['sid'] for r in self.roster}
+        self.draw_board()
+        self.draw_dialog()
+        self.draw_screen(wipe=False)
+
+    def _pop(self, sid, dy, delay):
+        def step(e):
+            off = dy * (1 - e)
+            self.scene.move('pop' + sid, 0, off - self.pop_off.get(sid, 0))
+            self.pop_off[sid] = off
+
+        self.win.after(delay, lambda: self.app.tw.run(420, step, ease=ease_back, key=('pop', sid)))
+
+    def pose(self, r, ph):
+        st = r['state']
+        if st == 'off':
+            return 'sleep'
+        if st == 'busy':
+            return 'type_a' if (ph // 3) % 2 else 'type_b'
+        if st == 'ready':
+            return 'raise'
+        seed = sum(map(ord, r['sid'][:6]))
+        if (ph + seed) % 41 == 0:
+            return 'blink'
+        return 'breath' if ((ph + seed) // 12) % 2 else 'idle'
+
+    def draw_board(self):
+        g = self.geo
+        if 'board' not in g:
+            return
+        c, Z, F = self.scene, self.app.Z, self.app.fonts
+        x0, y0, x1, y1 = g['board']
+        m = self.meeting()
+        got = sum(1 for r in self.roster if r['report'])
+        lines = [T('최근 {0}턴 업무 보고').format(m.get('turns', self.turns) if m else self.turns),
+                 T('참석 {0}명').format(len(self.roster)),
+                 (T('보고 {0}/{1} 도착').format(got, len(self.roster)) if m else T('회의 전'))]
+        c.create_text(x0 + 12 * Z, y0 + 10 * Z, text=T('오늘의 안건'), anchor='nw', font=F['c_wbt'], fill=MW['board_ink'])
+        c.create_line(x0 + 12 * Z, y0 + 30 * Z, x0 + 12 * Z + min(x1 - x0 - 24 * Z, 90 * Z), y0 + 30 * Z, fill=ACCENT,
+                      width=max(2, int(2 * Z)))
+        for i, t in enumerate(lines):
+            y = y0 + (40 + i * 17) * Z
+            if y > y1 - 12 * Z:
+                break
+            c.create_text(x0 + 12 * Z, y, text='• ' + fit(t, F['c_wb'], x1 - x0 - 30 * Z), anchor='nw', font=F['c_wb'],
+                          fill=MW['board_ink'])
+
+    def draw_screen(self, wipe=True):
+        """발표 스크린: 지금 대사에 캡처가 있으면 캡처, 없으면 제목 카드. 바뀔 땐 왼쪽에서 오른쪽으로 걷히며 나타난다."""
+        g = self.geo if hasattr(self, 'geo') else None
+        if not g:
+            return
+        c, Z, F = self.scene, self.app.Z, self.app.fonts
+        c.delete('scr')
+        x0, y0, x1, y1 = g['scr']
+        page = self.pages[self.pi] if self.pages else {}
+        imgs = page.get('images') or []
+        img = self.thumb(imgs[0], int(x1 - x0 - 12 * Z), int(y1 - y0 - 12 * Z)) if imgs else None
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        if img:
+            c.create_image(cx, cy, image=img, tags='scr')
+            if len(imgs) > 1:
+                c.create_text(x1 - 6 * Z, y1 - 4 * Z, text=f'+{len(imgs) - 1}', anchor='se', font=F['tiny'], fill=ACCENT, tags='scr')
+            c.tag_bind('scr', '<Button-1>', lambda e, p=imgs[0]: os.startfile(p))
+        else:
+            r = next((x for x in self.roster if x['sid'] == self.speaker), None)
+            if r and r['report']:
+                rep = r['report']
+                its = [it for it in rep.get('items') or [] if isinstance(it, dict)]
+                cnt = collections.Counter(it.get('status') for it in its)
+                c.create_text(cx, cy - 14 * Z, text=fit(one_line(rep.get('title') or r['name']), F['h2'], x1 - x0 - 24 * Z),
+                              font=F['h2'], fill=FG, tags='scr')
+                stat = ' · '.join(f'{REPORT_ST[k][0]} {cnt[k]}' for k in ('done', 'partial', 'todo') if cnt.get(k))
+                c.create_text(cx, cy + 12 * Z, text=stat or r['name'], font=F['small'], fill=DIM, tags='scr')
+            else:
+                draw_icon(c, 'meet', cx, cy - 12 * Z, 16 * Z, ACCENT, MW['screen'], tags='scr')
+                c.create_text(cx, cy + 18 * Z, text=T('회의실'), font=F['h2'], fill=FG, tags='scr')
+        if wipe:  # 막 바뀐 화면은 덮개가 걷히듯
+            cover = c.create_rectangle(x0, y0, x1, y1, fill=MW['screen'], outline='', tags='scr')
+            self.app.tw.run(300, lambda e: c.coords(cover, x0 + (x1 - x0) * e, y0, x1, y1), ease=ease_in_out, key='scr')
+
+    def thumb(self, path, width, height=None):
+        """캡처 미리보기 (width×height 안에 들도록 정수배 줄임). 못 읽으면 None."""
         try:
-            key = (path, os.path.getmtime(path), width)
+            key = (path, os.path.getmtime(path), width, height)
         except OSError:
             return None
         if key not in self.thumbs:
@@ -2819,171 +3255,403 @@ class MeetingWin:
                 img = tk.PhotoImage(file=path)
             except tk.TclError:
                 return None
-            k = max(1, -(-img.width() // width))
-            self.thumbs[key] = img.subsample(k, k) if k > 1 else img
+            # 정수배 줄임만 되므로 a/b (a=1~3) 중 칸에 들어가는 가장 큰 배율을 고른다
+            iw, ih = img.width(), img.height()
+            best = (0, 1, 1)
+            for a in (1, 2, 3):
+                if a > 1 and iw * ih * a * a > 8_000_000:  # 큰 캡처를 키우면 메모리를 많이 잡는다
+                    break
+                b = max(1, -(-iw * a // width), -(-ih * a // height) if height else 1)
+                if iw * a / b > best[0] and (a == 1 or b > a):
+                    best = (iw * a / b, a, b)
+            _w, a, b = best
+            if a > 1:
+                img = img.zoom(a, a)
+            self.thumbs[key] = img.subsample(b, b) if b > 1 else img
         return self.thumbs[key]
 
-    # ── 화면 ──
-    def build(self):
-        app, F, Z = self.app, self.app.fonts, self.app.Z
-        self.sig = self._sig()
-        pos = self.cv.yview()[0]
-        for c in self.inner.winfo_children():
-            c.destroy()
-        self.wraps = []
+    # ── 대사 창 ──
+    def draw_dialog(self):
+        g = self.geo
+        c, Z, F = self.scene, self.app.Z, self.app.fonts
+        W, H = g['W'], g['H']
+        x0, x1, y1 = 18 * Z, W - 18 * Z, H - 12 * Z
+        y0 = y1 - 84 * Z
+        g['dlg'] = (x0, y0, x1, y1)
+        c.delete('dlg')
+        round_rect(c, x0 + 3 * Z, y0 + 4 * Z, x1 + 3 * Z, y1 + 4 * Z, 14 * Z, fill=mix(MW['floor'], '#000000', 0.12), tags='dlg')
+        round_rect(c, x0, y0, x1, y1, 14 * Z, fill=SURF, outline=ACCENT, width=max(2, int(2 * Z)), tags='dlg')
+        r = next((x for x in self.roster if x['sid'] == self.speaker), None)
+        name = r['name'] if r else T('회의 진행')
+        nw = F['bodyb'].measure(name) + 28 * Z
+        round_rect(c, x0 + 18 * Z, y0 - 13 * Z, x0 + 18 * Z + nw, y0 + 13 * Z, 13 * Z, fill=ACCENT if r else BLUE, tags='dlg')
+        c.create_text(x0 + 18 * Z + nw / 2, y0, text=name, font=F['bodyb'], fill='#ffffff', tags='dlg')
+        self.t_id = c.create_text(x0 + 22 * Z, y0 + 20 * Z, text=self.ty['text'][:self.ty['n']], anchor='nw', font=F['body'],
+                                  fill=FG, width=x1 - x0 - 110 * Z, tags='dlg')
+        npg = len(self.pages)
+        self.pg_id = c.create_text(x1 - 16 * Z, y1 - 10 * Z, text=f'{self.pi + 1}/{npg}' if npg > 1 else '', anchor='se',
+                                   font=F['small'], fill=DIM, tags='dlg')
+        self.more_id = c.create_text(x1 - 22 * Z, y0 + 22 * Z, text='▼', anchor='ne', font=F['small'], fill=ACCENT,
+                                     state='hidden', tags='dlg')
+        for k, (tx, sym) in enumerate(((x1 - 78 * Z, '◀'), (x1 - 50 * Z, '▶'))):
+            cy = y1 - 30 * Z
+            tag = ('prev', 'next')[k]
+            c.create_oval(tx - 11 * Z, cy - 11 * Z, tx + 11 * Z, cy + 11 * Z, fill=CARD2, outline=EDGE, tags=('dlg', tag))
+            c.create_text(tx, cy, text=sym, font=F['tiny'], fill=ACC_TEXT, tags=('dlg', tag))
+            c.tag_bind(tag, '<Button-1>', lambda e, k=k: (self.scene.focus_set(), self.prev() if k == 0 else self.next()))
+        for it in c.find_withtag('dlg'):
+            tags = c.gettags(it)
+            if 'prev' not in tags and 'next' not in tags:
+                c.tag_bind(it, '<Button-1>', lambda e: (self.scene.focus_set(), self.next()))
+        self.text_px = x1 - x0 - 110 * Z
+        if self.typing() and not self.ty['job']:  # 창이 그려지기 전에 시작한 대사는 여기서 이어 친다
+            self.ty['job'] = self.win.after(self.TYPE_MS, self._type)
+
+    def say_system(self, m):
+        got = sum(1 for r in self.roster if r['report'])
+        if not m:
+            text = (T('{0}명을 초대했어요. 보고 범위를 고르고 [회의 시작]을 눌러 주세요.').format(len(self.roster)) if self.roster
+                    else T('어서 오세요! 아래 [회의 준비]에서 회의에 부를 세션을 골라 주세요.'))
+        elif got and got == len(self.roster) and all(r['state'] == 'done' for r in self.roster):
+            text = T('모든 보고가 끝났어요. 회의록에서 [자료로 저장]을 누르면 보고서 한 장으로 남겨요.')
+        elif got:
+            text = T('들은 보고를 다시 보려면 자리의 세션을 누르세요. 나머지 보고를 기다리는 중이에요… ({0}/{1})').format(got, len(self.roster))
+        else:
+            text = T('보고를 요청했어요. 세션들이 결과를 정리하고 화면을 캡처하는 중이에요… ({0}/{1})').format(got, len(self.roster))
+        if self.speaker is None and (not self.pages or self.pages[0]['text'] != text):
+            self.pages, self.pi = [{'text': text, 'images': []}], 0
+            self.draw_dialog() if hasattr(self, 'geo') else None
+            self.type_out(text)
+            self.draw_screen()
+
+    def build_pages(self, r):
+        rep, F = r['report'], self.app.fonts
+        segs = []
+        head = '\n'.join(x for x in (one_line(rep.get('title') or ''), clean(rep.get('summary') or '', 900)) if x)
+        if head:
+            segs.append((head, []))
         m = self.meeting()
-        self._setup(m)
-        if m:
-            self._reports(m)
-        for wd in self._all(self.inner):
-            wd.bind('<MouseWheel>', lambda e: self.cv.yview_scroll(int(-e.delta / 120), 'units'), add='+')
-        self._wrap(self.cv.winfo_width())
-        self.inner.update_idletasks()
-        self.cv.configure(scrollregion=self.cv.bbox('all'))
-        self.cv.yview_moveto(pos)
+        for it in rep.get('items') or []:
+            if not isinstance(it, dict):
+                continue
+            st = REPORT_ST.get(it.get('status'), REPORT_ST['done'])[0]
+            text = f'[{st}] ' + one_line(it.get('request') or '', 160)
+            if it.get('result'):
+                text += '\n' + clean(it['result'], 1200)
+            segs.append((text, self.images(m, it) if m else []))
+        if rep.get('next'):
+            segs.append((T('다음 할 일 · ') + clean(rep['next'], 600), []))
+        px = getattr(self, 'text_px', 600)
+        pages = []
+        for text, imgs in segs:
+            lines = wrap_text(text, F['body'], px)
+            for k in range(0, len(lines), 3):  # 대사 창 한 번에 세 줄
+                pages.append({'text': '\n'.join(lines[k:k + 3]), 'images': imgs})
+        return pages or [{'text': T('(빈 보고서)'), 'images': []}]
 
-    def _all(self, w):
-        out = [w]
-        for c in w.winfo_children():
-            out += self._all(c)
-        return out
+    def present(self, sid, user=False):
+        r = next((x for x in self.roster if x['sid'] == sid), None)
+        if not r or not r['report']:
+            if user and r:
+                self.app.toast(T('{0}의 보고서가 아직 없어요').format(r['name']))
+            return
+        self.speaker = sid
+        self.roster = self.make_roster(self.meeting())
+        self.draw_scene()
+        self.pages, self.pi = self.build_pages(r), 0
+        self.show_page()
 
-    def _chip(self, parent, text, on, cmd, img=None):
-        b = tk.Label(parent, text=text, image=img or '', compound='left', anchor='w' if img else 'center',
-                     font=self.app.fonts['bodyb' if on else 'body'],
-                     bg=MINT if on else CARD, fg=ACC_TEXT if on else FG, padx=10, pady=4, cursor='hand2',
-                     highlightthickness=2 if on else 1, highlightbackground=ACCENT if on else EDGE)
-        b.bind('<Button-1>', lambda e: cmd())
-        return b
+    def show_page(self):
+        page = self.pages[self.pi]
+        if hasattr(self, 'pg_id'):
+            self.scene.itemconfig(self.pg_id, text=f'{self.pi + 1}/{len(self.pages)}' if len(self.pages) > 1 else '')
+        self.type_out(page['text'])
+        prev = self.pages[self.pi - 1]['images'] if self.pi else None
+        self.draw_screen(wipe=page['images'] != prev)
 
-    def _setup(self, m):
-        app, F = self.app, self.app.fonts
-        card = tk.Frame(self.inner, bg=CARD, padx=16, pady=14, highlightthickness=1, highlightbackground=EDGE)
-        card.pack(fill='x', pady=(0, 12))
-        top = tk.Frame(card, bg=CARD)
-        top.pack(fill='x')
-        tk.Label(top, text=T('초대할 세션'), font=F['h2'], bg=CARD, fg=FG).pack(side='left')
-        live = self.live()
-        self.pick &= {sid for sid, _n, _m in live}
-        tk.Label(top, text=T('{0}명 선택').format(len(self.pick)), font=F['small'], bg=CARD, fg=DIM).pack(side='left', padx=10)
+    def type_out(self, text):
+        """대사를 한 글자씩. 문장 끝·쉼표에서 잠깐 쉰다. 움직임을 끄면 한 번에."""
+        if self.ty['job']:
+            self.win.after_cancel(self.ty['job'])
+        self.ty = {'text': text, 'n': 0, 'job': None}
+        if not self.app.anim_on.get():
+            self.ty['n'] = len(text)
+        self._type()
+
+    def _type(self):
+        ty, c = self.ty, self.scene
+        ty['job'] = None
+        if not self.win.winfo_exists() or not hasattr(self, 't_id'):
+            return
+        c.itemconfig(self.t_id, text=ty['text'][:ty['n']])
+        done = ty['n'] >= len(ty['text'])
+        c.itemconfig(self.more_id, state='hidden')
+        if done:
+            return
+        ch = ty['text'][ty['n']]
+        ty['n'] += 1
+        ty['job'] = self.win.after(self.PAUSE.get(ch, self.TYPE_MS), self._type)
+
+    def typing(self):
+        return self.ty['n'] < len(self.ty['text'])
+
+    def next(self):
+        if self.typing():  # 타이핑 중이면 그 줄을 바로 다 보이기
+            self.ty['n'] = len(self.ty['text'])
+            if self.ty['job']:
+                self.win.after_cancel(self.ty['job'])
+            self._type()
+            return
+        if self.pi + 1 < len(self.pages):
+            self.pi += 1
+            self.show_page()
+            return
+        if self.speaker:  # 발표 끝 → 다음 사람
+            self.presented.add(self.speaker)
+            self.speaker = None
+            m = self.meeting()
+            if m:
+                m['presented'] = sorted(self.presented)
+                try:
+                    write_json(MEET_FILE, m)
+                except OSError:
+                    pass
+            self.pages = []
+            self.refresh()
+            self.draw_scene()
+
+    def prev(self):
+        if self.pi > 0:
+            self.pi -= 1
+            self.show_page()
+
+    def _anim_tick(self):
+        """자리의 세션들: 숨쉬기·눈 깜빡임·타자·말할 때 들썩임, 머리 위 표시, 대사 다 나오면 ▼ 깜빡임."""
+        c, Z = self.scene, self.app.Z
+        self.ph += 1
+        if c.winfo_ismapped() and hasattr(self, 'seat_items'):
+            for sid, it in self.seat_items.items():
+                r = it['r']
+                frames = self.sprite(sid)[0]
+                pose = self.pose(r, self.ph) if self.app.anim_on.get() else self.pose(r, 0)
+                if pose != it['pose']:
+                    c.itemconfig(it['img'], image=frames[pose])
+                    it['pose'] = pose
+                bob = (-2 * Z if (self.ph // 2) % 2 else 0) if (r['state'] == 'talk' and self.typing()) else 0
+                if bob != it['bob']:
+                    c.move(it['img'], 0, bob - it['bob'])
+                    it['bob'] = bob
+                if it['txt'] and r['state'] == 'busy':
+                    c.itemconfig(it['txt'], text='.' * ((self.ph // 3) % 3 + 1))
+            if hasattr(self, 'more_id'):
+                show = not self.typing() and (self.speaker or self.pi + 1 < len(self.pages)) and (self.ph // 5) % 2 == 0
+                c.itemconfig(self.more_id, state='normal' if show else 'hidden')
+        self.win.after(110, self._anim_tick)
+
+    # ── 회의 준비 ──
+    def build_setup(self, m, live):
+        app, F, f = self.app, self.app.fonts, self.f_setup
+        for w in list(f.body.winfo_children()) + list(f.tools.winfo_children()):
+            w.destroy()
+        self.wraps = [l for l in self.wraps if l.winfo_exists()]
+        f.sub.configure(text=T('{0}명 선택').format(len(self.pick)))
         if live:
             allon = len(self.pick) == len(live)
-            app._btn(top, T('모두 빼기') if allon else T('모두 초대'),
-                     lambda: self._set_pick(set() if allon else {s for s, _n, _m in live})).pack(side='right')
-        grid = tk.Frame(card, bg=CARD)
-        grid.pack(fill='x', pady=(10, 0))
+            app._btn(f.tools, T('모두 빼기') if allon else T('모두 초대'),
+                     lambda: self._set_pick(set() if len(self.pick) == len(self.live()) else {s for s, _n, _m in self.live()})
+                     ).pack(side='right')
+        grid = tk.Frame(f.body, bg=CARD)
+        grid.pack(fill='x', pady=(2, 0))
         if not live:
             tk.Label(grid, text=T('켜져 있는 세션이 없어요. 세션 켜기에서 먼저 켜 주세요.'), font=F['body'], bg=CARD,
                      fg=DIM).pack(anchor='w')
         cols = max(1, (self.cv.winfo_width() - 60) // int(210 * app.Z)) if self.cv.winfo_width() > 1 else 3
+        self.chips = {}
         for i, (sid, name, mode) in enumerate(live):
-            on = sid in self.pick
             label = fit(name, F['bodyb'], int(130 * app.Z)) + ('' if mode != 'busy' else T(' · 작업 중'))
-            b = self._chip(grid, label, on, lambda s=sid: self._toggle(s), self.face(sid))
+            b = self._chip(grid, label, sid in self.pick, lambda s=sid: self._toggle(s), self.face(sid))
             b.grid(row=i // cols, column=i % cols, sticky='we', padx=(0, 8), pady=(0, 8))
-        for c in range(cols):
-            grid.columnconfigure(c, weight=1, uniform='m')
-        row = tk.Frame(card, bg=CARD)
+            self.chips[sid] = b
+        for col in range(cols):
+            grid.columnconfigure(col, weight=1, uniform='m')
+        row = tk.Frame(f.body, bg=CARD)
         row.pack(fill='x', pady=(6, 0))
         tk.Label(row, text=T('보고 범위'), font=F['h2'], bg=CARD, fg=FG).pack(side='left', padx=(0, 12))
+        self.turn_chips = {}
         for n in MEET_TURNS:
-            self._chip(row, T('최근 1턴') if n == 1 else T('최근 {0}턴').format(n), n == self.turns, lambda n=n: self._set_turns(n)).pack(side='left', padx=(0, 6))
-        go = app._btn(row, T('회의 시작'), self.start, bg=ACCENT, fg='#ffffff', hover=ACC_DARK, font='menu')
-        go.pack(side='right')
+            b = self._chip(row, T('최근 1턴') if n == 1 else T('최근 {0}턴').format(n), n == self.turns, lambda n=n: self._set_turns(n))
+            b.pack(side='left', padx=(0, 6))
+            self.turn_chips[n] = b
+        app._btn(row, T('회의 시작'), self.start, bg=ACCENT, fg='#ffffff', hover=ACC_DARK, font='menu').pack(side='right')
         if m:
             app._btn(row, T('회의 끝내기'), self.end).pack(side='right', padx=(0, 8))
-        l = tk.Label(card, text=T('회의를 시작하면 고른 세션마다 최근 N턴의 요청 목록과 보고 지시가 가요. 바쁜 세션은 하던 일을 마친 뒤 보고해요.'),
+        l = tk.Label(f.body, text=T('회의를 시작하면 고른 세션마다 최근 N턴의 요청 목록과 보고 지시가 가요. 바쁜 세션은 하던 일을 마친 뒤 보고해요.'),
                      font=F['small'], bg=CARD, fg=DIM, anchor='w', justify='left')
-        l.pack(fill='x', pady=(10, 0))
+        l.pack(fill='x', pady=(10, 4))
         self.wraps.append(l)
+        self._bind_wheel(f.outer)
+        self._wrap(self.cv.winfo_width())
 
-    def _reports(self, m):
-        app, F, Z = self.app, self.app.fonts, self.app.Z
-        top = tk.Frame(self.inner, bg=BG)
-        top.pack(fill='x', pady=(4, 8))
+    def _chip(self, parent, text, on, cmd, img=None):
+        b = tk.Label(parent, text=text, image=img or '', compound='left', anchor='w' if img else 'center', padx=10, pady=4,
+                     cursor='hand2')
+        self._chip_style(b, on, 0)
+        b.bind('<Button-1>', lambda e: cmd())
+        return b
+
+    def _chip_style(self, b, on, ms=170):
+        F = self.app.fonts
+        b.configure(font=F['bodyb' if on else 'body'], highlightthickness=2 if on else 1,
+                    highlightbackground=ACCENT if on else EDGE)
+        if ms:
+            self.app.fade_bg(b, MINT if on else CARD, ms, fg=ACC_TEXT if on else FG)
+        else:
+            b.configure(bg=MINT if on else CARD, fg=ACC_TEXT if on else FG)
+
+    def face(self, sid):
+        if sid not in self.faces:
+            self.faces[sid] = make_frames(sid, 2.2 * self.app.Z, self.app.avatars.get(sid))[0]['idle']
+        return self.faces[sid]
+
+    def _toggle(self, sid):
+        self.pick ^= {sid}
+        self.app.cfg['meet_pick'] = sorted(self.pick)
+        if sid in getattr(self, 'chips', {}):
+            self._chip_style(self.chips[sid], sid in self.pick)
+        self.f_setup.sub.configure(text=T('{0}명 선택').format(len(self.pick)))
+        self.refresh()
+
+    def _set_pick(self, pick):
+        self.pick = pick
+        self.app.cfg['meet_pick'] = sorted(pick)
+        for sid, b in getattr(self, 'chips', {}).items():
+            self._chip_style(b, sid in pick)
+        self.setup_sig = None
+        self.refresh()
+
+    def _set_turns(self, n):
+        self.turns = self.app.cfg['meet_turns'] = n
+        for k, b in self.turn_chips.items():
+            self._chip_style(b, k == n)
+        if hasattr(self, 'geo'):
+            self.scene.delete('all')
+            self.draw_scene()
+
+    # ── 회의록 ──
+    def build_minutes(self, m):
+        app, F, Z, f = self.app, self.app.fonts, self.app.Z, self.f_min
+        pos = self.cv.yview()[0]
+        for w in list(f.body.winfo_children()) + list(f.tools.winfo_children()):
+            w.destroy()
+        self.wraps = [l for l in self.wraps if l.winfo_exists()]
+        if not m:
+            f.sub.configure(text='')
+            tk.Label(f.body, text=T('회의를 시작하면 세션들의 보고서가 여기에 쌓여요.'), font=F['body'], bg=CARD, fg=DIM,
+                     anchor='w').pack(fill='x', pady=(0, 6))
+            self._bind_wheel(f.outer)
+            return
         when = datetime.datetime.fromtimestamp(m.get('startedAt', 0) / 1000).strftime(T('%m월 %d일 %H:%M'))
-        got = sum(1 for sid in m['members'] if self.report(m, sid))
-        tk.Label(top, text=T('보고서'), font=F['h2'], bg=BG, fg=FG).pack(side='left')
-        tk.Label(top, text=T('{0} 시작 · 최근 {1}턴 · {2}/{3} 도착').format(when, m.get('turns', '?'), got, len(m['members'])),
-                 font=F['small'], bg=BG, fg=DIM).pack(side='left', padx=10)
-        app._btn(top, T('자료로 저장'), lambda: self.export(m)).pack(side='right')
-        app._btn(top, T('폴더 열기'), lambda: os.startfile(self.folder(m)) if os.path.isdir(self.folder(m)) else None
+        got = [r['sid'] for r in self.roster if r['report']]
+        f.sub.configure(text=T('{0} 시작 · 최근 {1}턴 · {2}/{3} 도착').format(when, m.get('turns', '?'), len(got), len(m['members'])))
+        app._btn(f.tools, T('자료로 저장'), lambda: self.export(m)).pack(side='right')
+        app._btn(f.tools, T('폴더 열기'), lambda: os.startfile(self.folder(m)) if os.path.isdir(self.folder(m)) else None
                  ).pack(side='right', padx=(0, 6))
-        with app.mon.lock:
-            alive = {sid: (app.mon.display_name(s), s.mode()) for sid, s in app.mon.sessions.items()}
-        names = m.get('names') or {}
-        for sid in m['members']:
-            r = self.report(m, sid)
-            name, mode = alive.get(sid, (names.get(sid) or sid[:8], None))
-            if r:
-                st, col = T('보고 완료'), '#2fb985'
-            elif mode is None:
-                st, col = T('꺼져 있음'), '#8a96a3'
-            elif mode == 'busy':
-                st, col = T('보고 준비 중'), '#5b9ee8'
-            else:
-                st, col = T('요청 보냄'), '#f0a020'
-            card = tk.Frame(self.inner, bg=CARD, padx=16, pady=14, highlightthickness=1, highlightbackground=EDGE)
-            card.pack(fill='x', pady=(0, 10))
-            hd = tk.Frame(card, bg=CARD)
-            hd.pack(fill='x')
-            tk.Label(hd, image=self.face(sid), bg=MINT, padx=4, pady=4).pack(side='left', padx=(0, 12))
-            tx = tk.Frame(hd, bg=CARD)
-            tx.pack(side='left', fill='x', expand=True)
-            t1 = tk.Frame(tx, bg=CARD)
-            t1.pack(fill='x')
-            tk.Label(t1, text=clean(name, 40), font=F['h2'], bg=CARD, fg=FG).pack(side='left')
-            tk.Label(t1, text=st, font=F['tiny'], bg=col, fg='#ffffff', padx=8, pady=1).pack(side='left', padx=10)
-            if r and r.get('title'):
-                tk.Label(tx, text=one_line(r['title'], 90), font=F['bodyb'], bg=CARD, fg=ACC_TEXT, anchor='w').pack(fill='x', pady=(2, 0))
-            if not r:
-                tk.Label(tx, text=T('보고서를 기다리는 중이에요.') if mode else T('세션이 꺼져서 보고를 받을 수 없어요.'),
-                         font=F['small'], bg=CARD, fg=DIM, anchor='w').pack(fill='x', pady=(2, 0))
-                continue
-            if r.get('summary'):
-                l = tk.Label(card, text=clean(r['summary'], 1200), font=F['body'], bg=CARD2, fg=FG, anchor='w',
-                             justify='left', padx=12, pady=8)
-                l.pack(fill='x', pady=(10, 0))
-                self.wraps.append(l)
-            for it in (r.get('items') if isinstance(r.get('items'), list) else [])[:20]:
-                if isinstance(it, dict):
-                    self._item(card, m, it)
-            if r.get('next'):
-                l = tk.Label(card, text=T('다음 할 일 · ') + clean(r['next'], 600), font=F['small'], bg=CARD, fg=TEXT2,
-                             anchor='w', justify='left')
-                l.pack(fill='x', pady=(10, 0))
-                self.wraps.append(l)
+        fresh = set(got) - self.known if self.known is not None else set()
+        self.known = set(got)
+        for r in self.roster:
+            self._card(m, r, r['sid'] in fresh)
+        self._bind_wheel(f.outer)
+        self._wrap(self.cv.winfo_width())
+        self.win.after_idle(lambda: self.cv.yview_moveto(pos))
+
+    def _card(self, m, r, fresh):
+        app, F = self.app, self.app.fonts
+        st = {'ready': (T('보고 완료'), '#2fb985'), 'talk': (T('발표 중'), ACCENT), 'done': (T('보고 완료'), '#2fb985'),
+              'off': (T('꺼져 있음'), '#8a96a3'), 'busy': (T('보고 준비 중'), '#5b9ee8'), 'wait': (T('요청 보냄'), '#f0a020')}
+        label, col = st.get(r['state'], st['wait'])
+        card = tk.Frame(self.f_min.body, bg=CARD2, padx=14, pady=12, highlightthickness=2,
+                        highlightbackground=ACCENT if fresh else CARD2)
+        card.pack(fill='x', pady=(0, 10))
+        if fresh:  # 막 도착한 보고서는 테두리가 반짝였다가 가라앉는다
+            app.tw.run(1600, lambda e: card.configure(highlightbackground=mix(ACCENT, CARD2, e)), ease=ease_in_out,
+                       key=('fresh', str(card)))
+        hd = tk.Frame(card, bg=CARD2)
+        hd.pack(fill='x')
+        tk.Label(hd, image=self.face(r['sid']), bg=MINT, padx=4, pady=4).pack(side='left', padx=(0, 12))
+        tx = tk.Frame(hd, bg=CARD2)
+        tx.pack(side='left', fill='x', expand=True)
+        t1 = tk.Frame(tx, bg=CARD2)
+        t1.pack(fill='x')
+        tk.Label(t1, text=clean(r['name'], 40), font=F['h2'], bg=CARD2, fg=FG).pack(side='left')
+        tk.Label(t1, text=label, font=F['tiny'], bg=col, fg='#ffffff', padx=8, pady=1).pack(side='left', padx=10)
+        rep = r['report']
+        if rep:
+            b = app._btn(hd, T('발표 보기'), lambda s=r['sid']: (self.cv.yview_moveto(0), self.present(s, user=True)),
+                         bg=CARD, fg=ACC_TEXT, hover=HOVER)
+            b.configure(highlightbackground=ACCENT)
+            b.pack(side='right')
+        if rep and rep.get('title'):
+            tk.Label(tx, text=one_line(rep['title'], 90), font=F['bodyb'], bg=CARD2, fg=ACC_TEXT, anchor='w').pack(fill='x', pady=(2, 0))
+        if not rep:
+            tk.Label(tx, text=T('보고서를 기다리는 중이에요.') if r['mode'] else T('세션이 꺼져서 보고를 받을 수 없어요.'),
+                     font=F['small'], bg=CARD2, fg=DIM, anchor='w').pack(fill='x', pady=(2, 0))
+            return
+        if rep.get('summary'):
+            l = tk.Label(card, text=clean(rep['summary'], 1200), font=F['body'], bg=CARD, fg=FG, anchor='w',
+                         justify='left', padx=12, pady=8)
+            l.pack(fill='x', pady=(10, 0))
+            self.wraps.append(l)
+        for it in (rep.get('items') if isinstance(rep.get('items'), list) else [])[:20]:
+            if isinstance(it, dict):
+                self._item(card, m, it)
+        if rep.get('next'):
+            l = tk.Label(card, text=T('다음 할 일 · ') + clean(rep['next'], 600), font=F['small'], bg=CARD2, fg=TEXT2,
+                         anchor='w', justify='left')
+            l.pack(fill='x', pady=(10, 0))
+            self.wraps.append(l)
 
     def _item(self, card, m, it):
         F, Z = self.app.fonts, self.app.Z
-        f = tk.Frame(card, bg=CARD)
+        f = tk.Frame(card, bg=CARD2)
         f.pack(fill='x', pady=(12, 0))
         tk.Frame(f, bg=EDGE, height=1).pack(fill='x', pady=(0, 10))
-        top = tk.Frame(f, bg=CARD)
+        top = tk.Frame(f, bg=CARD2)
         top.pack(fill='x')
         st, col = REPORT_ST.get(it.get('status'), REPORT_ST['done'])
         tk.Label(top, text=st, font=F['tiny'], bg=col, fg='#ffffff', padx=8, pady=1).pack(side='left')
-        l = tk.Label(top, text=one_line(it.get('request') or '', 160), font=F['bodyb'], bg=CARD, fg=FG, anchor='w', justify='left')
+        l = tk.Label(top, text=one_line(it.get('request') or '', 160), font=F['bodyb'], bg=CARD2, fg=FG, anchor='w', justify='left')
         l.pack(side='left', fill='x', expand=True, padx=10)
         self.wraps.append(l)
         if it.get('result'):
-            l = tk.Label(f, text=clean(it['result'], 1500), font=F['body'], bg=CARD, fg=TEXT2, anchor='w', justify='left')
+            l = tk.Label(f, text=clean(it['result'], 1500), font=F['body'], bg=CARD2, fg=TEXT2, anchor='w', justify='left')
             l.pack(fill='x', pady=(6, 0))
             self.wraps.append(l)
         files = [str(x) for x in it.get('files') or [] if x][:8]
         if files:
-            l = tk.Label(f, text=T('파일 · ') + ', '.join(files), font=F['small'], bg=CARD, fg=DIM, anchor='w', justify='left')
+            l = tk.Label(f, text=T('파일 · ') + ', '.join(files), font=F['small'], bg=CARD2, fg=DIM, anchor='w', justify='left')
             l.pack(fill='x', pady=(4, 0))
             self.wraps.append(l)
-        shots = tk.Frame(f, bg=CARD)
+        shots = tk.Frame(f, bg=CARD2)
         shots.pack(fill='x', pady=(6, 0))
         for p in self.images(m, it)[:6]:
             img = self.thumb(p, int(260 * Z))
             if not img:
                 continue
-            b = tk.Label(shots, image=img, bg=CARD, cursor='hand2', highlightthickness=1, highlightbackground=EDGE)
+            b = tk.Label(shots, image=img, bg=CARD2, cursor='hand2', highlightthickness=1, highlightbackground=EDGE)
             b.pack(side='left', padx=(0, 8))
             b.bind('<Button-1>', lambda e, p=p: os.startfile(p))
+
+    def _bind_wheel(self, root):
+        stack = [root]
+        while stack:
+            w = stack.pop()
+            w.bind('<MouseWheel>', lambda e: self.cv.yview_scroll(int(-e.delta / 120), 'units'), add='+')
+            stack += w.winfo_children()
+
+    def _wrap(self, width):
+        for l in self.wraps:
+            if l.winfo_exists():
+                l.configure(wraplength=max(240, width - 100))
 
     def images(self, m, it):
         out = []
@@ -2995,18 +3663,6 @@ class MeetingWin:
         return out
 
     # ── 조작 ──
-    def _toggle(self, sid):
-        self._set_pick(self.pick ^ {sid})
-
-    def _set_pick(self, pick):
-        self.pick = pick
-        self.app.cfg['meet_pick'] = sorted(pick)
-        self.build()
-
-    def _set_turns(self, n):
-        self.turns = self.app.cfg['meet_turns'] = n
-        self.build()
-
     def start(self):
         app = self.app
         if not self.pick:
@@ -3036,14 +3692,19 @@ class MeetingWin:
         write_json(MEET_FILE, m)
         app.save_cfg()
         app.toast(T('{0}개 세션에 업무 보고를 요청했어요').format(sent))
-        self.build()
+        self.presented, self.speaker, self.pages, self.known = set(), None, [], set()
+        self.f_setup.toggle(False)  # 준비 칸은 접고 회의 장면에 집중
+        self.refresh()
 
     def end(self):
         try:
             os.remove(MEET_FILE)
         except OSError:
             pass
-        self.build()
+        self.speaker, self.pages, self.known = None, [], None
+        self.presented = set()
+        self.f_setup.toggle(True)
+        self.refresh()
 
     def export(self, m):
         """보고서를 캡처와 함께 HTML 한 장으로 만들어 브라우저로 연다."""
@@ -3239,6 +3900,9 @@ class App:
         root.minsize(1000, 640)
         self.anim_on = tk.BooleanVar(value=self.cfg.get('anim', True))
         self.topmost = tk.BooleanVar(value=self.cfg.get('topmost', False))
+        self.tw = Tweens(root, self.anim_on.get)
+        self.menu_p = 0.0  # 게임 메뉴가 펼쳐진 정도 (0~1)
+        self._side_py = None  # 왼쪽 막대에서 고른 칸 표시의 지금 위치
         # 왼쪽 아이콘 막대 | 오른쪽 (상단 막대, 게임 메뉴, 사무실+패널)
         self.side = tk.Canvas(root, width=int(84 * self.Z), bg=SIDE, highlightthickness=0)
         self.side.pack(side='left', fill='y')
@@ -3277,6 +3941,8 @@ class App:
         tk.Label(ph, text=T('Esc = 사무실로 · 메뉴 > 창으로 열기를 켜면 별도 창으로 열려요'), font=self.fonts['small'], bg=TOPBG,
                  fg=DIM).pack(side='right')
         tk.Frame(self.page_wrap, bg=EDGE, height=1).pack(fill='x')
+        self.page_slot = tk.Frame(self.page_wrap, bg=BG)
+        self.page_slot.pack(fill='both', expand=True)
         self.paned.add(self.right, minsize=400, stretch='never', width=self.cfg.get('panel_w', 560))
 
         self.cv.bind('<Configure>', self._on_cv_resize)
@@ -3343,20 +4009,36 @@ class App:
         b = tk.Label(parent, text=text, font=self.fonts[font], bg=bg, fg=fg, padx=12, pady=4, cursor='hand2',
                      highlightthickness=1, highlightbackground=EDGE if bg in (CARD, CARD2) else bg)
         b.bind('<Button-1>', lambda e: cmd())
-        b.bind('<Enter>', lambda e: b.configure(bg=hover))
-        b.bind('<Leave>', lambda e: b.configure(bg=b._bg))
+        b.bind('<Enter>', lambda e: self.fade_bg(b, hover, 110))
+        b.bind('<Leave>', lambda e: self.fade_bg(b, b._bg, 170))
         b._bg = bg
         return b
 
+    def fade_bg(self, w, col, ms, fg=None):
+        """위젯 바탕(과 글자)색을 지금 색에서 col로 부드럽게 바꾼다."""
+        try:
+            a, af = w.cget('bg'), w.cget('fg')
+        except tk.TclError:
+            return
+        self.tw.run(ms, lambda e: w.configure(bg=mix_any(a, col, e), **({'fg': mix_any(af, fg, e)} if fg else {})),
+                    ease=ease_in_out, key=('bg', str(w)))
+
     def toast(self, text, warn=False):
-        """창 아래쪽에 잠깐 뜨는 알림."""
+        """창 아래쪽에 잠깐 뜨는 알림. 아래에서 살짝 튀어 올라왔다가 내려가며 사라진다."""
         if self.toast_w:
             self.toast_w.destroy()
         l = tk.Label(self.root, text=clean(text, 120), font=self.fonts['bodyb'], bg='#e8505b' if warn else ROOM['toast'],
                      fg='#ffffff', padx=18, pady=9)
-        l.place(relx=0.5, rely=1.0, y=-30, anchor='s')
+        l.place(relx=0.5, rely=1.0, y=40, anchor='s')
         self.toast_w = l
-        self.root.after(3800, lambda: l.destroy() if l.winfo_exists() else None)
+        self.tw.run(320, lambda e: l.place_configure(y=int(40 - 70 * e)), ease=ease_back, key='toast')
+
+        def out():
+            if l.winfo_exists():
+                self.tw.run(220, lambda e: l.place_configure(y=int(-30 + 80 * e)), lambda: l.destroy(),
+                            ease=lambda t: t * t, key='toast')
+
+        self.root.after(3600, out)
 
     def _on_escape(self, e):
         if self.close_lang():
@@ -3468,8 +4150,9 @@ class App:
             y = self.gm.winfo_rooty() - self.root.winfo_rooty() + box[3] + 8 * Z
         else:
             x, y = (rw - W) / 2, (rh - H) / 2
-        c.place(x=max(8, min(x, rw - W - 8)), y=max(8, min(y, rh - H - 8)))
+        c.place(x=max(8, min(x, rw - W - 8)), y=max(8, min(y, rh - H - 8)), height=1)
         c.tk.call('raise', c._w)
+        self.tw.run(220, lambda e: c.place_configure(height=max(1, int((H + 2) * e))), ease=ease_out, key='lang')
         self._lang_armed = False  # 카드를 연 그 클릭은 '밖 클릭'으로 치지 않는다
         self.root.after_idle(lambda: setattr(self, '_lang_armed', True))
         if not getattr(self, '_lang_bound', False):  # 카드 밖을 누르면 닫는다
@@ -3521,7 +4204,9 @@ class App:
         c = getattr(self, 'lang_card', None)
         if c:
             self.lang_card = None
-            c.destroy()
+            h0 = c.winfo_height()  # 위로 접히며 사라진다
+            self.tw.run(150, lambda e: c.place_configure(height=max(1, int(h0 * (1 - e)))), c.destroy, ease=ease_in_out,
+                        key=('lang_out', str(c)))
             return True
         return False
 
@@ -3617,23 +4302,37 @@ class App:
 
     def draw_side(self, force=False):
         items = self.side_items()
-        sig = (tuple((k, n) for k, _l, _f, n in items), self.side_hover, self.Z, self.menu_open, self.page_key)
+        sig = (tuple((k, n) for k, _l, _f, n in items), self.side_hover, self.Z, self.menu_open, self.page_key, self._side_py)
         if sig == self.side_sig and not force:
             return
         self.side_sig = sig
         c, Z, F = self.side, self.Z, self.fonts
         c.delete('all')
         W = int(84 * Z)
+        h = 66 * Z
         c.configure(width=W)
         self.side_boxes = []
+        # 고른 칸 표시(본문 바탕색으로 이어 붙인 둥근 칸)는 칸을 바꾸면 새 자리로 미끄러져 간다
+        sel = next((i for i, it in enumerate(items) if it[0] == ('menu' if self.menu_open else self.page_key if self.page else 'home')), 0)
+        goal = 14 * Z + sel * (h + 6 * Z)
+        if self._side_py is None or getattr(self, '_side_z', None) != Z:
+            self._side_py, self._side_z, self._side_goal = goal, Z, goal
+        elif goal != getattr(self, '_side_goal', goal):
+            self._side_goal, start = goal, self._side_py
+
+            def step(e, start=start, goal=goal):
+                self._side_py = start + (goal - start) * e
+                self.draw_side(force=True)
+
+            self.tw.run(260, step, ease=ease_out, key='side')
+        py = self._side_py
+        if self.side_hover is not None and self.side_hover != sel:
+            hy = 14 * Z + self.side_hover * (h + 6 * Z)
+            round_rect(c, 5 * Z, hy, W - 5 * Z, hy + h, 16 * Z, fill=SIDE_HOVER, outline='')
+        round_rect(c, 5 * Z, py, W + 30 * Z, py + h, 18 * Z, fill=BG, outline='')
         y = 14 * Z
         for i, (key, label, fn, n) in enumerate(items):
-            h = 66 * Z
-            on = key == ('menu' if self.menu_open else self.page_key if self.page else 'home')
-            if on:  # 고른 칸은 본문 바탕색으로 이어 붙인다
-                round_rect(c, 5 * Z, y, W + 30 * Z, y + h, 18 * Z, fill=BG, outline='')
-            elif i == self.side_hover:
-                round_rect(c, 5 * Z, y, W - 5 * Z, y + h, 16 * Z, fill=SIDE_HOVER, outline='')
+            on = abs(py - y) < h / 2
             col = (ACCENT if DARK else SIDE) if on else '#ffffff'
             wrap = F['tiny'].measure(label) > W - 12 * Z  # 긴 이름(번역)은 두 줄로
             draw_icon(c, key, W / 2, y + (22 if wrap else 26) * Z, 13 * Z, col, BG if on else SIDE)
@@ -3773,33 +4472,31 @@ class App:
         self.menu_open = open_
         self.menu_btn.configure(text=T('✕  닫기') if open_ else T('☰  메뉴'))
         self.menu_hover = None
-        if open_:
+        if open_ and not self.gm.winfo_ismapped():
             # 아래 화면을 밀지 않고 상단 막대 바로 아래에 덮어 띄운다
-            self.menu_off = -int(self._menu_geom()[3])
+            self.menu_p = 0.0
+            self.menu_off = 1 - int(self._menu_geom()[3])
             self.gm.place(in_=self.main, x=0, y=self.top.winfo_height() + 1, relwidth=1, height=1)
             self.gm.tk.call('raise', self.gm._w)  # Canvas.lift는 그림 순서용이라 창 순서는 raise로
+            self.draw_menu()
         self._menu_anim_on = True
         self.draw_side()
-        self._menu_step(0)
+        start, goal = self.menu_p, 1.0 if open_ else 0.0
+        # 펼칠 땐 빠르게 나와 천천히 멈추고, 접을 땐 조금 더 빨리 부드럽게 (도중에 다시 누르면 그 자리에서 되돌아간다)
+        self.tw.run(int((260 if open_ else 190) * max(0.35, abs(goal - start))), lambda e: self._menu_set(start + (goal - start) * e),
+                    self._menu_done, ease=ease_out if open_ else ease_in_out, key='menu')
 
-    def _menu_step(self, k):
-        n = 10
-        e = 1 - (1 - (k + 1) / n) ** 3  # 처음엔 빠르게, 끝에서 천천히
-        p = e if self.menu_open else 1 - e
+    def _menu_set(self, p):
+        self.menu_p = p
         H = int(self._menu_geom()[3])
         h = max(1, int(H * p))
         self.gm.place_configure(height=h)
         off = h - H  # 위에서 아래로 미끄러져 내려오게 그림을 같이 움직인다
-        if k == 0 and self.menu_open:
-            self.menu_off = off
-            self.draw_menu()
-        else:
-            self.gm.move('all', 0, off - self.menu_off)
-            self.menu_off = off
+        self.gm.move('all', 0, off - self.menu_off)
+        self.menu_off = off
         self._place_tr(int((self.tr.winfo_width() + 60) * p))
-        if k + 1 < n:
-            self.root.after(16, self._menu_step, k + 1)
-            return
+
+    def _menu_done(self):
         self._menu_anim_on = False
         if self.menu_open:
             self.tr.place_forget()
@@ -4150,7 +4847,10 @@ class App:
             else:
                 f.pack_forget()
         for key, b in self.tab_btns.items():
-            b.configure(bg=ACCENT if key == k else CARD2, fg='#ffffff' if key == k else FG)
+            if b.cget('bg') in (ACCENT, CARD2):
+                self.fade_bg(b, ACCENT if key == k else CARD2, 180, fg='#ffffff' if key == k else FG)
+            else:  # 처음 그릴 때
+                b.configure(bg=ACCENT if key == k else CARD2, fg='#ffffff' if key == k else FG)
         if k == 'log':
             self.unseen = 0
             self.p_log.see('end')

@@ -27,9 +27,12 @@ a KakaoTalk-style chat between sessions, and one-click session launch / resume.
 - **SessionTalk** – a chat view of messages between sessions; type into it to give any session a command.
 - **Meeting room** – invite sessions and pick the last 1/3/5/10 turns; each session writes a report of what it did
   for those requests (done / partial / not done, files, next steps) and captures its results on screen with
-  [`assets/capture.ps1`](assets/capture.ps1). Reports show up as cards with screenshot thumbnails and can be saved
-  as one HTML document. (Sessions may ask permission to write the report file or run the capture script.)
+  [`assets/capture.ps1`](assets/capture.ps1). Invited sessions sit around a conference table; when a report arrives
+  that session raises a hand and presents it line by line in a typed-out dialogue box, with its captures on the
+  projector screen. Reports are also kept as cards in the minutes and can be saved as one HTML document. (Sessions may ask permission to write the report file or run the capture script.)
 - **Launch session** – start a new session in a folder, or resume a closed one (`claude --resume`) in a new terminal.
+- **Smooth motion** – menus slide, sections fold open, screens glide in, the sidebar highlight follows your choice
+  (turn it all off with *Animation* in the menu).
 - **Game-style menu**, light / **dark theme**, **Korean / English / Japanese / Chinese** UI, zoom 100–200%.
 - Light on resources (~60 MB RAM, a few % of one CPU core). Only reads local files; nothing leaves your PC.
 
@@ -90,9 +93,12 @@ saved meeting documents (`session-collab/meeting/`).
   제안의 선택지 버튼을 누르면 그 일이 해당 세션에 바로 요청돼요. 처음 실행할 때 만들지 물어봐요.
 - **세션톡** – 세션끼리 주고받은 메시지를 카톡처럼 보고, 아래 입력칸으로 세션에 직접 명령을 보내요.
 - **회의실** – 세션을 초대하고 최근 1·3·5·10턴을 고르면, 세션마다 그동안 맡은 일의 결과(완료·일부·못 함, 파일, 남은 일)를
-  보고서로 정리하고 [`assets/capture.ps1`](assets/capture.ps1)로 결과 화면을 캡처해 올려요. 보고서는 캡처 미리보기와 함께
-  카드로 보이고, HTML 자료 한 장으로 저장할 수 있어요. (보고서 파일 쓰기·캡처 실행에 세션이 권한을 물을 수 있어요.)
+  보고서로 정리하고 [`assets/capture.ps1`](assets/capture.ps1)로 결과 화면을 캡처해 올려요. 초대한 세션은 회의 탁자에 둘러앉고,
+  보고서가 오면 손을 든 뒤 차례로 발표해요. 대사는 타이핑되듯 나오고 캡처는 발표 스크린에 떠요. 보고서는 회의록 카드로도
+  남고, HTML 자료 한 장으로 저장할 수 있어요. (보고서 파일 쓰기·캡처 실행에 세션이 권한을 물을 수 있어요.)
 - **세션 켜기** – 새 세션을 시작하거나 꺼진 세션을 원래 폴더에서 이어서 켜요(새 터미널 창).
+- **부드러운 움직임** – 메뉴가 미끄러져 열리고, 칸이 접히고 펼쳐지고, 화면이 밀려 들어오고, 왼쪽 막대 표시가 따라 움직여요
+  (메뉴 > 움직임으로 끌 수 있어요).
 - **게임식 메뉴**, 밝은/**다크 테마**, **한국어·영어·일본어·중국어**, 글자 크기 100~200%.
 - 가벼워요(메모리 약 60MB, CPU 한 코어의 몇 %). 내 PC의 파일만 읽고 밖으로 보내는 것은 없어요.
 
