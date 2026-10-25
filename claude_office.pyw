@@ -652,6 +652,59 @@ def past_session(path):
     return out
 
 
+def clean_empty_sessions(live, min_age=600, peer_age=3600):
+    """쓸모없는 세션 흔적을 지운다. 지운 (대화 기록 수, 상태 파일 수).
+    - 대화 기록(jsonl) 가운데 사용자·Claude의 말이 한 줄도 없는 것 (예: 새로 켜기만 한 터미널에 mod 다시 불러오기
+      알림만 적혀 '/resume' 목록에 'session-panel: reloaded'로 보이던 것). 켜져 있는 세션, min_age초 안에 바뀐 것은 둔다.
+    - 진행 패널 mod의 peer-<세션>.json 가운데 꺼진 세션이고 peer_age초 넘게 갱신되지 않은 것 (세션 목록에 'bin'으로 쌓이던 것).
+      주고받은 메시지(out-*.json)와 받은 메시지 기록(seen-*.json)은 대화 내용이라 건드리지 않는다."""
+    now = time.time()
+    n_tr = n_peer = 0
+    for p in glob.glob(os.path.join(PROJ, '*', '*.jsonl')):
+        sid = os.path.basename(p)[:-6]
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        if sid in live or len(sid) != 36 or st.st_size > 64_000 or now - st.st_mtime < min_age:
+            continue
+        talk = False
+        try:
+            with open(p, encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    try:
+                        kind = json.loads(line).get('type')
+                    except ValueError:
+                        talk = True  # 읽을 수 없는 줄이 있으면 손대지 않는다
+                        break
+                    if kind in ('user', 'assistant', 'summary', 'custom-title', 'ai-title'):
+                        talk = True
+                        break
+        except OSError:
+            continue
+        if talk or os.path.isdir(os.path.join(os.path.dirname(p), sid)):  # 하위 폴더(도구 결과 등)가 있으면 둔다
+            continue
+        try:
+            os.remove(p)
+            n_tr += 1
+        except OSError:
+            pass
+    for p in glob.glob(os.path.join(COLLAB, 'peer-*.json')):
+        sid = os.path.basename(p)[5:-5]
+        try:
+            age = now - os.path.getmtime(p)
+        except OSError:
+            continue
+        if sid in live or age < peer_age:
+            continue
+        try:
+            os.remove(p)
+            n_peer += 1
+        except OSError:
+            pass
+    return n_tr, n_peer
+
+
 def scan_past(skip, days=30, limit=80):
     """최근 days일 안에 쓰인 대화 기록 중 지금 켜져 있지 않은 세션 (새것부터)."""
     cut = time.time() - days * 86400
@@ -4741,6 +4794,26 @@ class App:
             root.after(1500, self.remote_start)
         if self.first_run and not self.cfg.get('onboarded'):
             root.after(3000, self._maybe_onboard)  # 첫 폴링으로 비서 세션이 이미 있는지 본 뒤
+        else:
+            root.after(4000, self._maybe_mod)  # 이미 쓰던 PC: 더 새 mod가 들어 있으면 업데이트를 권한다
+        root.after(20_000, self._clean_loop)
+
+    def _clean_loop(self):
+        """켤 때와 30분마다 빈 세션 기록·꺼진 세션의 상태 파일을 치운다 (파일 읽기는 다른 스레드에서)."""
+        with self.mon.lock:
+            live = set(self.mon.sessions)
+        live |= set(self.pending)  # 막 켜는 중인 세션
+
+        def work():
+            try:
+                n = clean_empty_sessions(live)
+                if any(n):
+                    print('cleaned empty sessions', n, file=sys.stderr)
+            except Exception as ex:
+                print('clean error', ex, file=sys.stderr)
+
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(30 * 60_000, self._clean_loop)
 
     # ── 공용 ──
     def _fs(self, base):
