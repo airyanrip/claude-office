@@ -63,11 +63,14 @@ pythonw claude_office.pyw
 ```
 or double-click `run.bat`. Settings are stored in `%LOCALAPPDATA%\ClaudeOffice\settings.json`.
 
-### Optional: session-panel mod (needed for SessionTalk commands and progress)
+### session-panel mod (needed for SessionTalk / phone commands and progress)
 The office reads progress reports and inter-session messages written by the **session-panel** mod in
-[`mod/session-panel`](mod/session-panel). Copy that folder to `%USERPROFILE%\.claude\mods\session-panel`;
-new Claude Code sessions pick it up automatically. Without it the office still shows sessions, status,
-tokens and logs, but SessionTalk commands and the task board stay empty.
+[`mod/session-panel`](mod/session-panel), and commands you send from SessionTalk or your phone are delivered by it.
+On first run the app offers to install it (also **☰ Menu → Session link mod**, which also offers updates): it copies
+the folder to `%USERPROFILE%\.claude\mods\session-panel` and adds that folder to `env.CLAUDE_CODE_PLUGIN_DIRS` in
+`%USERPROFILE%\.claude\settings.json` (other settings are kept; a backup is saved as `settings.json.office-backup`).
+To do it by hand, do the same two steps. It applies to Claude Code sessions started afterwards. Without it the office
+still shows sessions, status, tokens and logs, but commands are not delivered and the task board stays empty.
 
 ### Secretary skill
 On first run the app offers to create a secretary session and installs the `secretary` skill from
@@ -151,10 +154,13 @@ pythonw claude_office.pyw
 ```
 또는 `run.bat`을 더블클릭. 설정은 `%LOCALAPPDATA%\ClaudeOffice\settings.json`에 저장돼요.
 
-### 선택: session-panel mod (세션톡 명령·작업 분배판에 필요)
-진행 보고와 세션 간 메시지는 [`mod/session-panel`](mod/session-panel)의 **session-panel** mod가 씁니다.
-이 폴더를 `%USERPROFILE%\.claude\mods\session-panel`로 복사하면 새로 켜는 Claude Code 세션이 자동으로 불러와요.
-없어도 세션·상태·토큰·로그는 보이지만, 세션톡 명령과 작업 분배판은 비어 있어요.
+### session-panel mod (세션톡·휴대폰 명령, 작업 분배판에 필요)
+진행 보고와 세션 간 메시지는 [`mod/session-panel`](mod/session-panel)의 **session-panel** mod가 쓰고, 세션톡·휴대폰에서 보낸
+명령도 이 mod가 세션에 전해요. 처음 실행할 때 설치할지 물어봐요(**☰ 메뉴 → 세션 연결 mod**에서도 설치·업데이트).
+설치하면 폴더를 `%USERPROFILE%\.claude\mods\session-panel`에 복사하고, `%USERPROFILE%\.claude\settings.json`의
+`env.CLAUDE_CODE_PLUGIN_DIRS`에 그 폴더를 더해요(다른 설정은 그대로, 원래 파일은 `settings.json.office-backup`으로 백업).
+직접 하려면 이 두 가지를 똑같이 하면 돼요. 그 뒤에 켜는 Claude Code 세션부터 적용돼요. 없어도 세션·상태·토큰·로그는 보이지만,
+명령은 전달되지 않고 작업 분배판은 비어 있어요.
 
 ### 비서 스킬
 처음 실행할 때 비서 세션을 만들면 [`assets/secretary`](assets/secretary)의 `secretary` 스킬을

@@ -54,6 +54,10 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 FONT_DIR = os.path.join(APP_DIR, 'fonts')   # Pretendard (SIL OFL 1.1, 무료)
 SKILL_SRC = os.path.join(APP_DIR, 'assets', 'secretary')
 SKILL_DIR = os.path.join(CLAUDE, 'skills', 'secretary')
+MOD_SRC = os.path.join(APP_DIR, 'mod', 'session-panel')     # 이 프로그램에 든 session-panel mod
+MOD_DIR = os.path.join(CLAUDE, 'mods', 'session-panel')     # 설치할 곳
+CLAUDE_SETTINGS = os.path.join(CLAUDE, 'settings.json')
+MOD_ENV = 'CLAUDE_CODE_PLUGIN_DIRS'                         # Claude Code가 mod를 불러오는 폴더 목록
 
 
 def load_fonts():
@@ -203,6 +207,60 @@ def read_json(path):
             return json.load(f)
     except Exception:
         return None
+
+
+def _same_path(a, b):
+    return os.path.normcase(os.path.normpath(a.strip())) == os.path.normcase(os.path.normpath(b.strip()))
+
+
+def _mod_ver(path):
+    v = str((read_json(os.path.join(path, '.claude-plugin', 'plugin.json')) or {}).get('version') or '0')
+    return tuple(int(x) for x in re.findall(r'\d+', v)[:3]) or (0,)
+
+
+def _claude_settings():
+    """~/.claude/settings.json (없으면 {}, 읽을 수 없으면 None)."""
+    if not os.path.exists(CLAUDE_SETTINGS):
+        return {}
+    try:
+        with open(CLAUDE_SETTINGS, encoding='utf-8-sig') as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def mod_state():
+    """session-panel mod: 'ok' / 'missing'(없음) / 'unlinked'(있지만 Claude Code가 불러오지 않음) / 'old'(이 프로그램에 든 것이 더 새것)."""
+    if not os.path.isfile(os.path.join(MOD_DIR, 'hooks', 'register.tsx')):
+        return 'missing'
+    env = (_claude_settings() or {}).get('env') or {}
+    dirs = str(env.get(MOD_ENV) or os.environ.get(MOD_ENV) or '')
+    if not any(_same_path(x, MOD_DIR) for x in dirs.split(os.pathsep) if x.strip()):
+        return 'unlinked'
+    if os.path.isdir(MOD_SRC) and _mod_ver(MOD_SRC) > _mod_ver(MOD_DIR):
+        return 'old'
+    return 'ok'
+
+
+def install_mod():
+    """mod를 ~/.claude/mods/session-panel 에 복사하고 ~/.claude/settings.json 의 env 에 불러오기 설정을 더한다.
+    settings.json은 그 칸만 고치고(다른 mod 경로가 있으면 덧붙임), 고치기 전 사본을 settings.json.office-backup 으로 남긴다.
+    읽을 수 없는 settings.json이면 아무것도 고치지 않고 ValueError."""
+    cfg = _claude_settings()
+    if cfg is None or not isinstance(cfg.get('env', {}), dict):
+        raise ValueError(T('~/.claude/settings.json을 읽을 수 없어요'))
+    shutil.copytree(MOD_SRC, MOD_DIR, dirs_exist_ok=True, ignore=shutil.ignore_patterns('*.test.tsx'))
+    env = cfg.setdefault('env', {})
+    cur = [x for x in str(env.get(MOD_ENV) or '').split(os.pathsep) if x.strip()]
+    if not any(_same_path(x, MOD_DIR) for x in cur):
+        if os.path.exists(CLAUDE_SETTINGS):
+            shutil.copy2(CLAUDE_SETTINGS, CLAUDE_SETTINGS + '.office-backup')
+        env[MOD_ENV] = os.pathsep.join(cur + [MOD_DIR])
+        tmp = CLAUDE_SETTINGS + '.tmp'
+        with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CLAUDE_SETTINGS)
 
 
 def write_json(path, data):
@@ -1756,6 +1814,11 @@ def draw_icon(c, kind, cx, cy, s, col, bg='#ffffff', tags=()):
         for r_ in (0.32, 0.6):
             c.create_arc(cx + s * 0.38 - r_ * s, cy - s * 0.55 - r_ * s, cx + s * 0.38 + r_ * s, cy - s * 0.55 + r_ * s,
                          start=-30, extent=90, style='arc', **ow)
+    elif kind == 'plug':  # 세션 연결 mod: 플러그
+        round_rect(c, cx - s * 0.55, cy - s * 0.35, cx + s * 0.55, cy + s * 0.35, s * 0.14, fill=col, outline='', tags=tags)
+        for dx in (-0.25, 0.25):
+            c.create_line(cx + dx * s, cy - s * 0.35, cx + dx * s, cy - s * 0.85, **kw)
+        c.create_line(cx, cy + s * 0.35, cx, cy + s * 0.9, **kw)
     elif kind == 'close':
         c.create_line(cx - s * 0.6, cy - s * 0.6, cx + s * 0.6, cy + s * 0.6, **kw)
         c.create_line(cx - s * 0.6, cy + s * 0.6, cx + s * 0.6, cy - s * 0.6, **kw)
@@ -4205,6 +4268,7 @@ class OnboardWin:
         self.app.cfg['onboarded'] = True
         self.app.save_cfg()
         self.win.destroy()
+        self.app.root.after(600, self.app._maybe_mod)
 
     def yes(self):
         self._done()
@@ -4802,6 +4866,8 @@ class App:
                   T('켬') if self.topmost.get() else T('끔'), 0),
                  ('play', T('움직임'), lambda: self.anim_on.set(not self.anim_on.get()), T('켬') if self.anim_on.get() else T('끔'), 0),
                  ('type', T('대사 속도'), self.cycle_type_speed, TYPE_SPEED_TEXT[self.type_speed()], 0),
+                 ('plug', T('세션 연결 mod'), lambda: (self.toggle_menu(False), self.mod_dialog()),
+                  {'ok': T('켜짐'), 'old': T('업데이트')}.get(mod_state(), T('꺼짐')), 0),
                  ('window', T('창으로 열기'), self.toggle_popup, T('켬') if self.popup.get() else T('끔'), 0),
                  ('moon', T('다크 테마'), self.toggle_theme, T('켬') if DARK else T('끔'), 0),
                  ('globe', T('언어'), self.pick_lang, dict(LANGS)[LANG], 0)]
@@ -6470,8 +6536,43 @@ class App:
     def _maybe_onboard(self):
         if self.sec_sid or self.cfg.get('onboarded'):
             self.cfg['onboarded'] = True
+            self._maybe_mod()
             return
         OnboardWin(self)
+
+    def _maybe_mod(self):
+        """처음 한 번(또는 더 새 mod가 생겼을 때) session-panel mod 설치를 권한다."""
+        st = mod_state()
+        if st == 'ok' or (st != 'old' and self.cfg.get('mod_asked')) or (st == 'old' and self.cfg.get('mod_asked_ver') == list(_mod_ver(MOD_SRC))):
+            return
+        self.mod_dialog(first=True)
+
+    def mod_dialog(self, first=False):
+        """session-panel mod 설치·업데이트. 세션톡·휴대폰 명령 배달과 진행도 표시에 필요하다."""
+        st = mod_state()
+        if st == 'ok':
+            tkmsg.showinfo(T('세션 연결 mod'), T('session-panel mod가 설치되어 켜져 있어요.'), parent=self.root)
+            return
+        text = (T('이 프로그램에 든 session-panel mod가 설치된 것보다 새것이에요. 업데이트할까요?\n새로 켜는 Claude Code 세션부터 적용돼요.')
+                if st == 'old' else
+                T('세션톡·휴대폰에서 보낸 명령을 세션에 전하고 진행도를 보여 주는 session-panel mod가 이 PC에서 켜져 있지 않아요.\n\n'
+                  '설치하면:\n· ~/.claude/mods/session-panel 에 mod를 복사해요\n'
+                  '· ~/.claude/settings.json 에 불러오기 설정을 더해요 (원래 파일은 settings.json.office-backup 으로 남겨요)\n\n'
+                  '새로 켜는 Claude Code 세션부터 적용돼요. 설치할까요?'))
+        if not tkmsg.askyesno(T('세션 연결 mod'), text, parent=self.root):
+            if first:
+                self.cfg['mod_asked'] = True
+                if st == 'old':
+                    self.cfg['mod_asked_ver'] = list(_mod_ver(MOD_SRC))
+                self.save_cfg()
+                self.toast(T('나중에 메뉴 > 세션 연결 mod 에서 설치할 수 있어요'))
+            return
+        try:
+            install_mod()
+        except (OSError, ValueError) as ex:
+            tkmsg.showerror(T('세션 연결 mod'), T('mod를 설치하지 못했어요: {0}\nREADME의 수동 설치 방법을 참고하세요.').format(ex), parent=self.root)
+            return
+        self.toast(T('session-panel mod를 설치했어요 · 새로 켜는 세션부터 적용돼요'))
 
     # ── 세션 이름 바꾸기 ──
     def rename_click(self):

@@ -262,9 +262,45 @@ const TITLE_SCRIPT = [
   'if($m.Count -gt 0){$s=$m[$m.Count-1].Groups[1].Value; -join ($s.ToCharArray()|%{ if([int]$_ -lt 128){$_}else{"\\u{0:x4}" -f [int]$_} })}',
 ].join('; ')
 
+// 작업 폴더: 세션이 막 열릴 때(이어 열기 포함) 읽기가 실패하면 빈 값으로 남았음 → 비어 있으면 동기화 때마다 다시 읽음
+const diag: Record<string, string> = {}
+const ensureRoot = async ($: EngineInterface): Promise<void> => {
+  if ((await read($, root)).length > 0) {
+    return
+  }
+  let where = ''
+  try {
+    where = await $.session.root()
+  } catch (err) {
+    diag.root = String(err)
+  }
+  if (where.length === 0) {
+    try {
+      where = await $.session.cwd()
+    } catch (err) {
+      diag.cwd = String(err)
+    }
+  }
+  if (where.length > 0) {
+    transcriptCache = ''
+    await update($, root, () => where)
+  }
+}
+
+// 폴더 · 이름을 못 읽었을 때만 그 까닭을 협업 폴더 diag-<세션>.json 에 남김
+const writeDiag = async ($: EngineInterface): Promise<void> => {
+  const ok = (await read($, root)).length > 0 && ((await read($, label)).length > 0 || (await read($, tabTitle)).length > 0)
+  if (ok) {
+    return
+  }
+  const path = `${await collabDir($)}/diag-${await mySession($)}.json`
+  await $.fs.write(path, JSON.stringify({ ...diag, root: await read($, root), transcript: transcriptCache, at: await $.clock.now() })).catch(() => {})
+}
+
 const refreshTitle = async ($: EngineInterface): Promise<void> => {
   const path = await transcriptPath($)
   if (path.length === 0) {
+    diag.title = 'transcript not found'
     return
   }
   const ran = await $.process.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', TITLE_SCRIPT], {
@@ -273,8 +309,10 @@ const refreshTitle = async ($: EngineInterface): Promise<void> => {
   })
   const raw = ran.stdout.trim()
   if (ran.exitCode !== 0 || raw.length === 0) {
+    diag.title = `exit ${ran.exitCode} · ${ran.stderr.trim().slice(0, 200)}`
     return
   }
+  delete diag.title
   const title = firstLine(String(JSON.parse(`"${raw}"`)), 40)
   if (title.length > 0 && title !== (await read($, tabTitle))) {
     await update($, tabTitle, () => title)
@@ -354,9 +392,13 @@ const deliver = async ($: EngineInterface, m: Message, from?: Peer): Promise<voi
 // 내 상태를 적고, 다른 세션들의 상태·메시지·인계 노트를 읽는다
 let syncCount = 0
 const sync = async ($: EngineInterface): Promise<void> => {
+  await ensureRoot($).catch(() => {})
   await refreshName($).catch(() => {})
   if (syncCount++ % TITLE_EVERY === 0) {
-    await refreshTitle($).catch(() => {})
+    await refreshTitle($).catch((err) => {
+      diag.title = String(err)
+    })
+    await writeDiag($).catch(() => {})
   }
   await writePeer($)
   const dir = await collabDir($)
