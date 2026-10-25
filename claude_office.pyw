@@ -496,6 +496,10 @@ def parse_line(d):
     if d.get('isSidechain'):
         return out
     if t == 'assistant':
+        msg = d.get('message') or {}
+        usage = msg.get('usage') if isinstance(msg.get('usage'), dict) else None
+        if usage and msg.get('id'):  # 세션톡의 '작업 중 (… · ↓ 토큰)' 표시용
+            out.append((ts, 'tok', (msg['id'], int(usage.get('output_tokens') or 0))))
         for c in (d.get('message') or {}).get('content') or []:
             if not isinstance(c, dict):
                 continue
@@ -706,6 +710,38 @@ def clean_empty_sessions(live, min_age=600, peer_age=3600):
     return n_tr, n_peer
 
 
+def turn_state(s):
+    """세션이 지금 답을 만드는 중이면 {start, tok, tool, mode} (CLI 아래의 '✻ … (6m 2s · ↓ 26.8k tokens)'), 아니면 None."""
+    mode = s.mode()
+    if mode not in ('busy', 'wait') or not s.qa:
+        return None
+    start = s.qa[-1][0]
+    tok = sum(n for ts, n in s.toks.values() if ts >= start - 1)
+    return {'start': start, 'tok': tok, 'tool': one_line(s.last_tool, 80) if mode == 'busy' else '', 'mode': mode}
+
+
+def fmt_elapsed(sec):
+    sec = max(0, int(sec))
+    if sec < 60:
+        return f'{sec}s'
+    if sec < 3600:
+        return f'{sec // 60}m {sec % 60}s'
+    return f'{sec // 3600}h {sec % 3600 // 60}m'
+
+
+def fmt_tok(n):
+    return f'{n / 1000:.1f}k' if n >= 1000 else str(n)
+
+
+SPIN = '·✢✳✶✻✽✻✶✳✢'
+
+
+def turn_line(st, spin=0):
+    """'✻ 작업 중… (6m 2s · ↓ 26.8k tokens)' 한 줄."""
+    head = T('확인을 기다리는 중') if st['mode'] == 'wait' else T('작업 중')
+    return f'{SPIN[spin % len(SPIN)]} {head}… ({fmt_elapsed(time.time() - st["start"])} · ↓ {fmt_tok(st["tok"])} tokens)'
+
+
 def scan_past(skip, days=30, limit=80):
     """최근 days일 안에 쓰인 대화 기록 중 지금 켜져 있지 않은 세션 (새것부터)."""
     cut = time.time() - days * 86400
@@ -849,6 +885,7 @@ class Session:
         self.last_act = 0
         self.last_tool = ''
         self.last_kind = ''
+        self.toks = collections.OrderedDict()  # 메시지 id → (시각, 출력 토큰)
         self.tracks = {}
         self.sub_scan = 0
         self.acc = Acc()
@@ -858,6 +895,13 @@ class Session:
         self.ver = 0
 
     def add_event(self, ts, kind, text):
+        if kind == 'tok':
+            mid, n = text
+            old = self.toks.get(mid)
+            self.toks[mid] = (old[0] if old else ts or time.time(), max(n, old[1] if old else 0))
+            while len(self.toks) > 3000:
+                self.toks.popitem(last=False)
+            return
         if kind == 'title':
             self.title = text
             return
@@ -1555,6 +1599,8 @@ ROOM = {  # 사무실 그림 색
     'say': _t('#e3f0ff', '#22364d'), 'bub_edge': _t('#8a909a', '#4a5563'), 'bub_text': _t('#22262e', '#e6ebf0'),
     'log_bg': _t('#fafbfc', '#151a20'), 'note': _t('#b07a1f', '#e0a84a'), 'toast': _t('#26313d', '#33404e'),
 }
+PIN_COL = '#e0a100'                              # 세션톡에서 고정한 세션 (금색)
+PIN_BG = _t('#fff7e0', '#2c2818')
 CHAT = {  # 세션톡 (카카오톡 풍)
     'bg': _t('#b2c7d9', '#1b2430'), 'head': _t('#a9bfd2', '#161e28'), 'title': _t('#1e2329', '#e6ebf0'),
     'sub': _t('#46525e', '#8d99a8'), 'other': _t('#ffffff', '#2a3440'), 'text': _t('#191919', '#e6ebf0'),
@@ -1563,6 +1609,7 @@ CHAT = {  # 세션톡 (카카오톡 풍)
     'input_fg': _t('#1e1e1e', '#e6ebf0'), 'input_edge': _t('#dfe3e8', '#2b343f'), 'chip': _t('#eef1f4', '#242c36'),
     'hint': _t('#8a929c', '#8d99a8'),
     'code': _t('#b4235a', '#ff9ac1'), 'code_bg': _t('#eef1f4', '#202832'), 'link': _t('#1f6fd1', '#7db4ff'),  # 마크다운
+    'typing_hl': _t('#c2410c', '#ffae6b'),  # 일하는 중 줄 (CLI의 주황 별)
 }
 
 
@@ -2485,6 +2532,7 @@ class ChatWin:
         self.room_sig = None
         self.room_ids, self.room_rows = None, {}
         self.md_cache = {}
+        self.spin, self.typ_items = 0, {}
         self.dirty = True
         F, Z = app.fonts, app.Z
         self.win = w = app.make_host('chat')
@@ -2545,6 +2593,7 @@ class ChatWin:
         self.dots = 0
         self.set_room('*')
         self._tick()
+        self._spin_tick()
 
     def _mark(self):
         self.dirty = True
@@ -2619,7 +2668,7 @@ class ChatWin:
             names = {s.sid: mon.display_name(s) for s in live}
             qa = {s.sid: [tuple(e) for e in s.qa] for s in live}
             modes = {s.sid: s.mode() for s in live}
-        out, typing, used = [], set(), set()
+        out, typing, used = [], {}, set()
         for m in msgs:
             m = dict(m)
             out.append(m)
@@ -2636,8 +2685,7 @@ class ChatWin:
                     out.append({'id': m['id'] + '-a', 'from': m['to'], 'fromLabel': names.get(m['to'], ''), 'to': 'user',
                                 'toLabel': T('나'), 'kind': 'answer', 'text': hit[3], 'ts': max(hit[2], m['ts'] + 0.001),
                                 'reply': True})
-                elif modes.get(m['to']) in ('busy', 'wait'):
-                    typing.add(m['to'])
+
         # 터미널에서 직접 나눈 대화도 세션마다 최근 TALK_HISTORY개 (세션톡에서 보낸 것은 위에서 이미 넣었다)
         for sid, entries in qa.items():
             for e in entries[-TALK_HISTORY:]:
@@ -2649,6 +2697,11 @@ class ChatWin:
                     out.append({'id': f'h-{sid[:8]}-{e[0]:.3f}-a', 'from': sid, 'fromLabel': names.get(sid, ''), 'to': 'user',
                                 'toLabel': T('나'), 'kind': 'answer', 'text': e[3], 'ts': max(e[2], e[0] + 0.001), 'reply': True,
                                 'cli': True})
+        with mon.lock:  # 지금 답을 만드는 중인 세션 (세션톡에서 보냈든 터미널에서 쳤든)
+            for s in live:
+                st = turn_state(s)
+                if st:
+                    typing[s.sid] = st
         out.sort(key=lambda m: m['ts'])
         return out, live, names, typing
 
@@ -2668,12 +2721,39 @@ class ChatWin:
             print('chat error', ex, file=sys.stderr)
         self.win.after(1000, self._tick)
 
+    def _spin_tick(self):
+        """일하는 중 줄만 빠르게 (별 모양이 돌고 시간이 흐른다). 대화 전체는 다시 그리지 않는다."""
+        if not self.win.winfo_exists():
+            return
+        self.spin += 1
+        if getattr(self, 'typing', None):
+            self._refresh_typing()
+        self.win.after(160, self._spin_tick)
+
+    def _refresh_typing(self):
+        mon = self.app.mon
+        for sid, (line, tool) in list(getattr(self, 'typ_items', {}).items()):
+            with mon.lock:
+                s = mon.sessions.get(sid)
+                st = turn_state(s) if s else None
+            if not st:
+                self.dirty = True  # 다 끝났다 → 다음 그리기에서 답변으로 바뀐다
+                continue
+            try:
+                self.cv.itemconfig(line, text=turn_line(st, self.spin))
+                if tool and st['tool']:
+                    self.cv.itemconfig(tool, text='⎿  ' + fit(st['tool'], self.app.fonts['small'], 520 * self.app.Z))
+            except tk.TclError:
+                pass
+
     def draw(self, to_end=False):
         mon = self.app.mon
         with mon.lock:
             sig = (mon.chat_ver, tuple((s.sid, s.qa_ver, s.mode(), mon.display_name(s)) for s in mon.sessions.values()),
                    self.room, self.target)
-        if sig == self.sig and not self.dirty and not getattr(self, 'typing', None):
+        if sig == self.sig and not self.dirty:
+            if getattr(self, 'typing', None):
+                self._refresh_typing()
             return
         self.sig, self.dirty = sig, False
         msgs, live, names, typing = self.collect()
@@ -2698,7 +2778,7 @@ class ChatWin:
         tgt = self.target if self.target in names else None
         self.to_btn.configure(text=T('받는 세션: {0} ▾').format(names[tgt]) if tgt else T('받는 세션 고르기 ▾'))
         self.read[room] = time.time()
-        self.draw_chat(shown, names, typing if room == '*' else typing & {room}, to_end)
+        self.draw_chat(shown, names, typing if room == '*' else {k: v for k, v in typing.items() if k == room}, to_end)
 
     def draw_rooms(self, msgs, live, names):
         rooms = ['*'] + [s.sid for s in live]
@@ -2722,15 +2802,25 @@ class ChatWin:
         self.room_sig = sig
         # 방 목록이 그대로면 줄을 다시 만들지 않고 글자·색만 바꾼다 (다시 만들면 목록이 접혔다 펴지며 튄다)
         ids = [r for r, *_ in info]
-        if ids != self.room_ids:
+        if (ids, tuple(pins)) != self.room_ids:
             for c in self.rooms.winfo_children():
                 c.destroy()
-            self.room_rows = {r: self._room_row(r) for r in ids}
-            self.room_ids = ids
+            F, Z = self.app.fonts, self.app.Z
+            self.room_rows = {}
+            for r in ids:
+                if pins and r == pins[0]:
+                    tk.Label(self.rooms, text='📌  ' + T('고정한 세션'), font=F['tiny'], bg=CARD, fg=PIN_COL, anchor='w',
+                             padx=14).pack(fill='x', pady=(8, 2))
+                self.room_rows[r] = self._room_row(r)
+                if pins and r == pins[-1]:
+                    tk.Frame(self.rooms, bg=EDGE, height=1).pack(fill='x', padx=12, pady=(4, 4))
+            self.room_ids = (ids, tuple(pins))
         F = self.app.fonts
         for r, label, prev, ts, unread in info:
             w = self.room_rows[r]
-            bg = MINT if r == self.room else CARD
+            bg = MINT if r == self.room else PIN_BG if r in pins else CARD
+            if w.get('bar'):
+                w['bar'].configure(bg=PIN_COL if r in pins else bg)
             for wd in w['bgs']:
                 wd.configure(bg=bg)
             room_w = int(280 * self.app.Z) - 110
@@ -2744,7 +2834,7 @@ class ChatWin:
                 pc.configure(bg=bg)
                 pc.delete('all')
                 s = int(pc['width'])
-                draw_icon(pc, 'pin', s / 2, s / 2, s * 0.36, ACCENT if r in pins else mix(EDGE, DIM, 0.35), bg)
+                draw_icon(pc, 'pin', s / 2, s / 2, s * 0.36, PIN_COL if r in pins else mix(EDGE, DIM, 0.35), bg)
             w['prev'].configure(text=fit(prev or T('아직 대화 없음'), F['small'], int(280 * self.app.Z) - 130))
             if unread:
                 w['badge'].configure(text=str(unread))
@@ -2754,8 +2844,12 @@ class ChatWin:
 
     def _room_row(self, r):
         F, Z = self.app.fonts, self.app.Z
-        f = tk.Frame(self.rooms, bg=CARD, padx=12, pady=8, cursor='hand2')
-        f.pack(fill='x')
+        row = tk.Frame(self.rooms, bg=CARD)
+        row.pack(fill='x')
+        bar = tk.Frame(row, bg=CARD, width=max(3, int(4 * Z)))  # 고정한 세션은 왼쪽 금색 막대
+        bar.pack(side='left', fill='y')
+        f = tk.Frame(row, bg=CARD, padx=12, pady=8, cursor='hand2')
+        f.pack(side='left', fill='x', expand=True)
         if r == '*':
             s = int(38 * Z)
             ic = tk.Canvas(f, width=s, height=s, bg=CARD, highlightthickness=0)
@@ -2786,7 +2880,7 @@ class ChatWin:
         for wd in bgs + [ic, badge]:
             wd.bind('<Button-1>', lambda e, r=r: self.set_room(r))
             wd.bind('<MouseWheel>', lambda e: self.rooms_cv.yview_scroll(int(-e.delta / 120), 'units'))
-        return {'bgs': bgs, 'when': when, 'name': name, 'prev': prev, 'badge': badge, 'pin': pin}
+        return {'bgs': bgs, 'when': when, 'name': name, 'prev': prev, 'badge': badge, 'pin': pin, 'bar': bar}
 
     def toggle_pin(self, sid):
         pins = [p for p in self.app.cfg.get('chat_pins') or [] if p != sid]
@@ -2796,6 +2890,7 @@ class ChatWin:
         self.app.save_cfg()
         self.app.toast(T('대화 상대 목록 위에 고정했어요') if sid in pins else T('고정을 풀었어요'))
         self.room_sig = None
+        self.dirty = True  # 바로 다시 그린다
         self.draw()
 
     @staticmethod
@@ -2882,17 +2977,25 @@ class ChatWin:
             c.create_text(bx0 + bw + 2 * pad + 6 * Z, y + bh + 1.6 * pad, text=self._clock(m['ts']), anchor='sw',
                           font=F['small'], fill=CHAT['time'])
             y += bh + 1.6 * pad + gap * 2
-        for sid in typing:  # 내 명령을 받아 일하는 중
+        self.typ_items = {}
+        for sid, st in typing.items():  # 지금 답을 만드는 중 (CLI 아래 줄처럼: 경과 시간 · ↓ 출력 토큰 · 지금 도구)
             ax, bx0 = 16 * Z, 66 * Z
             round_rect(c, ax, y, ax + 42 * Z, y + 42 * Z, 12 * Z, fill=MINT, outline='')
             c.create_image(ax + 21 * Z, y + 21 * Z, image=self.face(sid))
             t = c.create_text(bx0, y, anchor='nw', font=F['bodyb'], fill=CHAT['name'], text=names.get(sid, ''))
             y2 = c.bbox(t)[3] + 4 * Z
-            t = c.create_text(bx0 + pad, y2 + pad * 0.8, anchor='nw', font=F['body'], fill=CHAT['typing'],
-                              text=T('작업 중') + '.' * (self.dots or 1))
-            x0, y0, x1, y1 = c.bbox(t)
-            c.tag_lower(round_rect(c, bx0, y2, x1 + pad, y1 + pad * 0.8, 9 * Z, fill=self.OTHER, outline=''), t)
-            y = y1 + pad + gap * 2
+            w = max(F['bodyb'].measure(turn_line(dict(st, start=time.time() - 35999, tok=999999))),
+                    F['small'].measure('⎿  ' + st['tool']) if st['tool'] else 0)
+            line = c.create_text(bx0 + pad, y2 + pad * 0.8, anchor='nw', font=F['bodyb'], fill=CHAT['typing_hl'],
+                                 text=turn_line(st, self.spin))
+            yb = c.bbox(line)[3]
+            tool = None
+            if st['tool']:
+                tool = c.create_text(bx0 + pad, yb + 3 * Z, anchor='nw', font=F['small'], fill=CHAT['typing'], text='⎿  ' + st['tool'])
+                yb = c.bbox(tool)[3]
+            c.tag_lower(round_rect(c, bx0, y2, bx0 + w + 2 * pad, yb + pad * 0.8, 9 * Z, fill=self.OTHER, outline=''), line)
+            self.typ_items[sid] = (line, tool)
+            y = yb + pad + gap * 2
         c.configure(scrollregion=(0, 0, W, y + 10 * Z))
         if at_end:
             c.yview_moveto(1.0)

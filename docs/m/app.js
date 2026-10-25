@@ -63,6 +63,7 @@ const STR = {
   more_: ['더 보기', 'More', 'もっと見る', '展开'],
   pinnedSec: ['고정한 세션', 'Pinned', '固定したセッション', '已置顶'], pinOn: ['대화 상대 목록 위에 고정했어요', 'Pinned to the top', '一覧の上に固定しました', '已置顶'],
   pinOff: ['고정을 풀었어요', 'Unpinned', '固定を解除しました', '已取消置顶'],
+  tyWork: ['작업 중', 'Working', '作業中', '工作中'], tyWait: ['확인을 기다리는 중', 'Waiting for approval', '承認待ち', '等待确认'],
   members: ['대화상대', 'Members', 'メンバー', '成员'], searchName: ['이름 검색', 'Search names', '名前で検索', '搜索名称'],
   allRoom: ['전체 채팅방', 'All chats', '全体チャット', '全部聊天'], allRoomSub: ['모든 세션의 대화를 한곳에서', 'Every session in one place', 'すべてのセッションの会話をまとめて', '所有会话的对话'],
   sessionsN: ['세션 {0}', 'Sessions {0}', 'セッション {0}', '会话 {0}'], noMatch: ['찾는 세션이 없어요', 'No matching session', '該当するセッションがありません', '没有匹配的会话'],
@@ -916,7 +917,7 @@ function fillDrawer() {
     const on = pins.includes(s.sid);
     const pin = h('span', { class: 'dr-pin' + (on ? ' on' : ''), role: 'button', 'aria-label': 'pin', onclick: e => { e.stopPropagation(); togglePin(s.sid); fillDrawer(); render(true); } });
     pin.innerHTML = PIN_SVG;  // 고정 아이콘만 (PC 데이터 아님)
-    return h('button', { class: 'dr-row' + (room === s.sid ? ' on' : ''), onclick: () => pick(s.sid) }, pf,
+    return h('button', { class: 'dr-row' + (room === s.sid ? ' on' : '') + (on ? ' pinned' : ''), onclick: () => pick(s.sid) }, pf,
       h('div', { class: 'grow' }, h('div', { class: 'row', style: 'gap:6px' }, h('div', { class: 'nm ell grow', text: s.name }), chip(s.mode)),
         h('div', { class: 'st-msg ell', text: s.goal || s.tool || s.cwd || '' })),
       room === s.sid ? h('span', { class: 'chk', text: '✓' }) : null, pin);
@@ -956,12 +957,32 @@ function fillDrawer() {
     d = null;
   });
 })();
+// 지금 답을 만드는 중인 세션: CLI 아래 줄처럼 '✻ 작업 중… (6m 2s · ↓ 26.8k tokens)' + 지금 쓰는 도구
+let chatRecv = 0, spinN = 0;
+const SPIN = '·✢✳✶✻✽✻✶✳✢';
+const fmtEl = s => { s = Math.max(0, Math.floor(s)); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m`; };
+const fmtTok = n => (n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+function typingLine(x) {
+  return `${SPIN[spinN % SPIN.length]} ${t(x.mode === 'wait' ? 'tyWait' : 'tyWork')}… (${fmtEl(x.el + (Date.now() - chatRecv) / 1000)} · ↓ ${fmtTok(x.tok)} tokens)`;
+}
+function tickTyping() {
+  if (!chatData) return;
+  for (const x of chatData.typing || []) {
+    const b = document.querySelector(`.typing-b[data-sid="${CSS.escape(x.sid)}"]`);
+    if (!b) continue;
+    b.querySelector('.ty-line').textContent = typingLine(x);
+    const tl = b.querySelector('.ty-tool');
+    if (tl) tl.textContent = x.tool ? '⎿  ' + x.tool : '';
+  }
+}
+setInterval(() => { if (tab === 'talk' && !document.hidden) { spinN++; tickTyping(); } }, 160);
 function setRoom(r) { room = r; localStorage.setItem('co.room', r); chatData = null; render(); refreshChat(true); }
 async function refreshChat(force) {
   try {
     const d = await api('/api/chat?room=' + encodeURIComponent(room), null, { etag: true });
-    const sig = JSON.stringify(d);
-    if (sig === chatSig && !force) return;
+    const sig = JSON.stringify(d, (k, v) => (k === 'el' || k === 'tok' || k === 'tool' ? 0 : v));  // 시간·토큰만 바뀌면 다시 그리지 않고 그 줄만
+    chatRecv = Date.now();
+    if (sig === chatSig && !force) { if (chatData) { chatData.typing = d.typing; tickTyping(); } return; }
     chatSig = sig; chatData = d;
     drawChat(true);
   } catch (e) { /* 다음 폴링 때 */ }
@@ -1028,7 +1049,11 @@ function drawChat(scroll) {
       h('div', { class: 'b md' }, md(m.text)),
       h('div', { class: 'meta', text: (me && m.read ? t('read') + ' · ' : '') + ago(m.ts) })));
   });
-  if (chatData.typing.length && (room === '*' || chatData.typing.includes(room))) box.append(h('div', { class: 'typing' }, h('i'), h('i'), h('i')));
+  (chatData.typing || []).filter(x => room === '*' || x.sid === room).forEach(x => {
+    const s = state && state.sessions.find(q => q.sid === x.sid);
+    box.append(h('div', { class: 'msg other' }, h('div', { class: 'who', text: s ? s.name : '' }),
+      h('div', { class: 'b typing-b', 'data-sid': x.sid }, h('div', { class: 'ty-line', text: typingLine(x) }), h('div', { class: 'ty-tool', text: x.tool ? '⎿  ' + x.tool : '' }))));
+  });
   if (scroll) window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
 }
 

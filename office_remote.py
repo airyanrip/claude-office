@@ -1106,7 +1106,9 @@ def api_chat(r, dev, q, body):
         out = [{'id': m['id'], 'from': m['from'], 'to': m['to'], 'fromLabel': m.get('fromLabel', ''), 'toLabel': m.get('toLabel', ''),
                 'kind': m.get('kind', ''), 'text': _clip(m.get('text'), 3000), 'ts': m['ts'], 'read': bool(m.get('read')),
                 'reply': bool(m.get('reply'))} for m in msgs[-80:]]
-        return {'msgs': out, 'typing': sorted(typing)}
+        now = time.time()  # 일하는 중: 휴대폰은 받은 뒤로 흐른 시간만 더한다 (시계가 달라도 맞게)
+        return {'msgs': out, 'typing': [{'sid': k, 'el': round(now - v['start'], 1), 'tok': v['tok'], 'tool': _clip(v['tool'], 80),
+                                         'mode': v['mode']} for k, v in sorted(typing.items())]}
 
     return r.ui(build)
 

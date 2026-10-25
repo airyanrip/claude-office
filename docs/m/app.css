@@ -355,3 +355,16 @@ body.meet-docs .crop { width: 260px; }
 .dr-pin { width: 32px; height: 32px; display: grid; place-items: center; flex: none; color: var(--edge); border-radius: 10px; }
 .dr-pin.on { color: var(--accent); }
 .dr-pin svg { transform: rotate(-45deg); }
+/* 세션톡: 일하는 중 (CLI 아래 줄처럼) */
+.typing-b { font-variant-numeric: tabular-nums; }
+.ty-line { color: #c2410c; font-weight: 700; }
+.ty-tool { color: var(--dim); font-size: 12px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ty-tool:empty { display: none; }
+@media (prefers-color-scheme: dark) { .ty-line { color: #ffae6b; } }
+/* 고정한 세션: 금색으로 구별 */
+.room.pinned img { border-color: #e0a100; box-shadow: 0 0 0 2px #fff3c4; }
+.room.pinned span { color: #b07d00; font-weight: 700; }
+.room.on.pinned img { border-color: var(--accent); }
+.dr-row.pinned { background: color-mix(in srgb, #e0a100 12%, var(--bg)); box-shadow: inset 4px 0 0 #e0a100; }
+.dr-row.pinned.on { background: var(--mint); }
+.dr-pin.on { color: #e0a100; }
