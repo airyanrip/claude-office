@@ -369,3 +369,15 @@ body.meet-docs .crop { width: 260px; }
 .dr-row.pinned.on { background: var(--mint); }
 .dr-pin.on { color: #e0a100; }
 .chat .older { align-self: center; min-height: 34px; padding: 4px 14px; font-size: 13px; margin-bottom: 4px; }
+/* 세션톡: Claude의 선택지 질문 */
+.msg.ask { max-width: 92%; }
+.ask-card { border: 2px solid var(--accent) !important; display: flex; flex-direction: column; gap: 6px; white-space: normal !important; }
+.ask-head { align-self: flex-start; background: var(--accent); color: #fff; border-radius: 8px; padding: 0 8px; font-size: 11px; font-weight: 800; }
+.ask-q { font-weight: 800; }
+.ask-opt { text-align: left; border: 1px solid var(--edge); background: var(--card2); border-radius: 12px; padding: 8px 12px; display: flex; flex-direction: column; gap: 2px; }
+.ask-opt small { color: var(--dim); font-size: 12px; }
+.ask-opt.on { background: var(--mint); border: 2px solid var(--accent); color: var(--acc-text); }
+.ask-opt:active { transform: scale(.98); }
+.ask-more summary { color: var(--acc-text); font-weight: 700; font-size: 13px; margin: 2px 0; }
+.ask-free { margin-top: 4px; }
+.ask-sent { color: var(--acc-text); font-weight: 700; font-size: 13px; }

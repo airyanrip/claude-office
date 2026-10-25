@@ -27,6 +27,9 @@ a KakaoTalk-style chat between sessions, and one-click session launch / resume.
 - **SessionTalk** – a chat view of messages between sessions; type into it to give any session a command.
   Messages show markdown like the Claude Code terminal (bold, italic, code, code blocks, lists, quotes, links).
   Each room also shows the last 20 exchanges typed straight into the terminal, and you can pin important sessions to the top.
+  While a session works you see the CLI's line ("✻ Working… (6m 2s · ↓ 26.8k tokens)" and the current tool), and when Claude
+  asks you to choose (AskUserQuestion) the options appear as buttons: pick one (or several, or type your own) and the session
+  continues as if you had answered in the terminal (needs the session-panel mod 0.3+).
 - **Meeting room** – invite sessions and pick the last 1/3/5/10 turns; each session writes a report of what it did
   for those requests (done / partial / not done, files, next steps) and captures its results on screen with
   [`assets/capture.ps1`](assets/capture.ps1). Invited sessions sit around a conference table; when a report arrives
@@ -132,6 +135,9 @@ saved meeting documents (`session-collab/meeting/`).
 - **세션톡** – 세션끼리 주고받은 메시지를 카톡처럼 보고, 아래 입력칸으로 세션에 직접 명령을 보내요.
   메시지는 Claude Code 터미널처럼 굵게·기울임·코드·코드 블록·목록·인용·링크로 보여요.
   터미널에서 직접 나눈 대화도 방마다 최근 20개까지 보이고, 중요한 세션은 목록 위에 고정할 수 있어요.
+  세션이 일하는 동안은 CLI처럼 "✻ 작업 중… (6m 2s · ↓ 26.8k tokens)"와 지금 도구가 보이고, Claude가 고르라고 물으면
+  (AskUserQuestion) 선택지가 버튼으로 떠요. 고르면(여럿 고르기·직접 입력도) 터미널에서 답한 것처럼 이어서 진행해요
+  (session-panel mod 0.3 이상).
 - **회의실** – 세션을 초대하고 최근 1·3·5·10턴을 고르면, 세션마다 그동안 맡은 일의 결과(완료·일부·못 함, 파일, 남은 일)를
   보고서로 정리하고 [`assets/capture.ps1`](assets/capture.ps1)로 결과 화면을 캡처해 올려요. 초대한 세션은 회의 탁자에 둘러앉고,
   보고서가 오면 손을 든 뒤 차례로 발표해요. 대사는 타이핑되듯 나오고 캡처는 발표 스크린에 떠요(누르면 크게 보기). 회의 준비에서 **간단**(토큰 절약)과 **상세**를 고를 수 있어요.

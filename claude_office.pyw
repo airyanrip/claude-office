@@ -711,6 +711,32 @@ def clean_empty_sessions(live, min_age=600, peer_age=3600):
     return n_tr, n_peer
 
 
+def read_ask(sid):
+    """세션이 지금 고르라고 묻는 중이면 {id, at, questions:[{question, header, multiSelect, options:[{label, description}]}]}.
+    진행 패널 mod가 협업 폴더 ask-<세션>.json 에 적고, 답하면 done 으로 바꾼다."""
+    d = read_json(os.path.join(COLLAB, f'ask-{sid}.json'))
+    if not isinstance(d, dict) or d.get('done') or not isinstance(d.get('questions'), list) or not d.get('id'):
+        return None
+    qs = []
+    for q in d['questions'][:4]:
+        if not isinstance(q, dict) or not q.get('question'):
+            continue
+        opts = [{'label': one_line(str(o.get('label') or ''), 60), 'description': one_line(str(o.get('description') or ''), 160)}
+                for o in (q.get('options') if isinstance(q.get('options'), list) else [])[:6] if isinstance(o, dict) and o.get('label')]
+        qs.append({'question': clean(str(q['question']), 600), 'header': one_line(str(q.get('header') or ''), 20),
+                   'multiSelect': bool(q.get('multiSelect')), 'options': opts})
+    return {'id': str(d['id']), 'at': d.get('at') or 0, 'questions': qs} if qs else None
+
+
+def write_answer(sid, ask_id, answers):
+    """세션톡에서 고른 답을 answer-<세션>.json 에 적는다. mod가 읽어 Claude에게 그 답으로 이어 가게 한다."""
+    os.makedirs(COLLAB, exist_ok=True)
+    path = os.path.join(COLLAB, f'answer-{sid}.json')
+    with open(path + '.tmp', 'w', encoding='utf-8', newline='\n') as f:
+        json.dump({'id': ask_id, 'answers': answers, 'at': int(time.time() * 1000)}, f, ensure_ascii=False)
+    os.replace(path + '.tmp', path)
+
+
 def turn_state(s):
     """세션이 지금 답을 만드는 중이면 {start, tok, tool, mode} (CLI 아래의 '✻ … (6m 2s · ↓ 26.8k tokens)'), 아니면 None."""
     mode = s.mode()
@@ -2552,6 +2578,7 @@ class ChatWin:
         self.room_sig = None
         self.room_ids, self.room_rows = None, {}
         self.md_cache = app.__dict__.setdefault('chat_md', {})  # 글 배치 캐시도 앱에 남긴다
+        self.ask_sel, self.ask_sent = {}, {}  # 선택지 질문: 고르는 중인 답, 보낸 답
         self.spin, self.typ_items = 0, {}
         self.dirty = True
         F, Z = app.fonts, app.Z
@@ -2729,10 +2756,11 @@ class ChatWin:
                     out.append({'id': f'h-{sid[:8]}-{e[0]:.3f}-a', 'from': sid, 'fromLabel': names.get(sid, ''), 'to': 'user',
                                 'toLabel': T('나'), 'kind': 'answer', 'text': e[3], 'ts': max(e[2], e[0] + 0.001), 'reply': True,
                                 'cli': True})
+        self.asks = {s.sid: a for s in live for a in [read_ask(s.sid)] if a}  # 고르라고 묻는 중 (선택지 카드)
         with mon.lock:  # 지금 답을 만드는 중인 세션 (세션톡에서 보냈든 터미널에서 쳤든)
             for s in live:
                 st = turn_state(s)
-                if st:
+                if st and s.sid not in self.asks:
                     typing[s.sid] = st
         out.sort(key=lambda m: m['ts'])
         return out, live, names, typing
@@ -2784,8 +2812,10 @@ class ChatWin:
     def draw(self, to_end=False):
         mon = self.app.mon
         with mon.lock:
+            sids = list(mon.sessions)
             sig = (mon.chat_ver, tuple((s.sid, s.qa_ver, s.mode(), mon.display_name(s)) for s in mon.sessions.values()),
                    self.room, self.target)
+        sig += (tuple((sid, a['id']) for sid in sids for a in [read_ask(sid)] if a), repr(self.ask_sel))
         if sig == self.sig and not self.dirty:
             if getattr(self, 'typing', None):
                 self._refresh_typing()
@@ -3023,6 +3053,9 @@ class ChatWin:
             c.create_text(bx0 + bw + 2 * pad + 6 * Z, y + bh + 1.6 * pad, text=self._clock(m['ts']), anchor='sw',
                           font=F['small'], fill=CHAT['time'])
             y += bh + 1.6 * pad + gap * 2
+        for sid, ask in (getattr(self, 'asks', {}) or {}).items():
+            if self.room in ('*', sid):
+                y = self._ask_card(c, y, sid, ask, names) + gap * 2
         self.typ_items = {}
         for sid, st in typing.items():  # 지금 답을 만드는 중 (CLI 아래 줄처럼: 경과 시간 · ↓ 출력 토큰 · 지금 도구)
             ax, bx0 = 16 * Z, 66 * Z
@@ -3045,6 +3078,115 @@ class ChatWin:
         c.configure(scrollregion=(0, 0, W, y + 10 * Z))
         if at_end:
             c.yview_moveto(1.0)
+
+    def _ask_card(self, c, y, sid, ask, names):
+        """Claude가 고르라고 묻는 질문: 선택지를 누르면 그 답으로 이어 간다 (여럿 고르기·직접 입력도)."""
+        F, Z = self.app.fonts, self.app.Z
+        pad = 12 * Z
+        ax, bx0 = 16 * Z, 66 * Z
+        cw = min(560 * Z, max(320 * Z, self.cv.winfo_width() * 0.62))
+        key = (sid, ask['id'])
+        sel = self.ask_sel.setdefault(key, {})
+        sent = self.ask_sent.get(key)
+        round_rect(c, ax, y, ax + 42 * Z, y + 42 * Z, 12 * Z, fill=MINT, outline='')
+        c.create_image(ax + 21 * Z, y + 21 * Z, image=self.face(sid))
+        t = c.create_text(bx0, y, anchor='nw', font=F['bodyb'], fill=CHAT['name'], text=names.get(sid, ''))
+        c.create_text(c.bbox(t)[2] + 6 * Z, y + 1 * Z, anchor='nw', font=F['small'], fill=CHAT['time'],
+                      text=T('→ 나 · 고르면 바로 이어서 진행해요'))
+        top = c.bbox(t)[3] + 4 * Z
+        first = None
+        yy = top + pad
+        multi_any = len(ask['questions']) > 1 or any(q['multiSelect'] for q in ask['questions'])
+        for qi, q in enumerate(ask['questions']):
+            if q['header']:
+                h = c.create_text(bx0 + pad + 8 * Z, yy + 2 * Z, anchor='nw', text=q['header'], font=F['tiny'], fill='#ffffff')
+                hb = c.bbox(h)
+                chip = round_rect(c, hb[0] - 8 * Z, hb[1] - 2 * Z, hb[2] + 8 * Z, hb[3] + 2 * Z, 8 * Z, fill=ACCENT, outline='')
+                c.tag_lower(chip, h)
+                first = first or chip  # 카드 바탕은 이것보다 아래에
+                yy = hb[3] + 6 * Z
+            qt = c.create_text(bx0 + pad, yy, anchor='nw', text=q['question'], font=F['bodyb'], fill=CHAT['text'], width=cw - 2 * pad)
+            first = first or qt
+            yy = c.bbox(qt)[3] + 8 * Z
+            picked = sel.get(qi, set())
+            free = [x for x in picked if x not in {o['label'] for o in q['options']}]
+            for oi, o in enumerate(q['options'] + [{'label': None, 'description': ''}]):
+                is_free = o['label'] is None
+                on = (bool(free) if is_free else o['label'] in picked)
+                mark = ('☑ ' if on else '☐ ') if q['multiSelect'] else ('● ' if on else f'{oi + 1}. ')
+                label = (T('✎ 직접 입력…') if not free else '✎ ' + free[0]) if is_free else o['label']
+                tag = f'ask-{qi}-{oi}-{id(ask)}'
+                lt = c.create_text(bx0 + pad + 12 * Z, yy + 8 * Z, anchor='nw', text=(mark if not is_free else '') + label, font=F['bodyb'],
+                                   fill=ACC_TEXT if on else CHAT['text'], width=cw - 2 * pad - 24 * Z, tags=tag)
+                yb = c.bbox(lt)[3]
+                if o.get('description'):
+                    dt = c.create_text(bx0 + pad + 12 * Z, yb + 2 * Z, anchor='nw', text=o['description'], font=F['small'], fill=CHAT['time'],
+                                       width=cw - 2 * pad - 24 * Z, tags=tag)
+                    yb = c.bbox(dt)[3]
+                box = round_rect(c, bx0 + pad, yy, bx0 + cw - pad, yb + 8 * Z, 9 * Z, fill=MINT if on else CHAT['code_bg'],
+                                 outline=ACCENT if on else '', width=2 if on else 1, tags=tag)
+                c.tag_lower(box, lt)
+                if not sent:
+                    c.tag_bind(tag, '<Button-1>', lambda e, qi=qi, lab=o['label']: self.pick_ask(sid, ask, qi, lab))
+                    c.tag_bind(tag, '<Enter>', lambda e: c.configure(cursor='hand2'))
+                    c.tag_bind(tag, '<Leave>', lambda e: c.configure(cursor=''))
+                yy = yb + 14 * Z
+            yy += 4 * Z
+        if sent:
+            st = c.create_text(bx0 + pad, yy, anchor='nw', text=T('보냈어요 · {0}').format(sent), font=F['small'], fill=ACC_TEXT,
+                               width=cw - 2 * pad)
+            yy = c.bbox(st)[3] + 6 * Z
+        elif multi_any:
+            ready = all(sel.get(qi) for qi in range(len(ask['questions'])))
+            bt = c.create_text(bx0 + cw - pad - 10 * Z, yy + 6 * Z, anchor='ne', text=T('답 보내기'), font=F['bodyb'],
+                               fill='#ffffff' if ready else CHAT['time'], tags='ask-send')
+            b = c.bbox(bt)
+            c.tag_lower(round_rect(c, b[0] - 14 * Z, b[1] - 6 * Z, b[2] + 14 * Z, b[3] + 6 * Z, 10 * Z, fill=ACCENT if ready else CHAT['code_bg'],
+                                   outline='', tags='ask-send'), bt)
+            if ready:
+                c.tag_bind('ask-send', '<Button-1>', lambda e: self.send_ask(sid, ask))
+            yy = b[3] + 12 * Z
+        bg = round_rect(c, bx0, top, bx0 + cw, yy, 9 * Z, fill=self.OTHER, outline=ACCENT, width=2)
+        if first:
+            c.tag_lower(bg, first)
+        return yy
+
+    def pick_ask(self, sid, ask, qi, label):
+        q = ask['questions'][qi]
+        sel = self.ask_sel.setdefault((sid, ask['id']), {})
+        if label is None:  # 직접 입력
+            import tkinter.simpledialog as tksd
+            text = tksd.askstring(T('직접 입력'), q['question'], parent=self.app.root)
+            if not text or not text.strip():
+                return
+            sel[qi] = {text.strip()}
+        elif q['multiSelect']:
+            cur = set(sel.get(qi, set()))
+            cur ^= {label}
+            sel[qi] = cur
+        else:
+            sel[qi] = {label}
+        if len(ask['questions']) == 1 and not q['multiSelect']:
+            self.send_ask(sid, ask)
+            return
+        self.dirty = True
+        self.draw()
+
+    def send_ask(self, sid, ask):
+        sel = self.ask_sel.get((sid, ask['id']), {})
+        answers = {}
+        for qi, q in enumerate(ask['questions']):
+            labels = [o['label'] for o in q['options'] if o['label'] in sel.get(qi, set())]
+            labels += [x for x in sel.get(qi, set()) if x not in labels]
+            if labels:
+                answers[q['question']] = ', '.join(labels)
+        if not answers:
+            return
+        if not self.app.answer_ask(sid, ask, answers):
+            return
+        self.ask_sent[(sid, ask['id'])] = ' / '.join(answers.values())
+        self.dirty = True
+        self.draw(to_end=True)
 
     def _clock(self, ts):
         dt = datetime.datetime.fromtimestamp(ts)
@@ -7447,6 +7589,32 @@ class App:
             self.sec_sent.pop(next(iter(self.sec_sent)))
         self.sec_mark(it['_key'], True)
         self.toast(T('{0}에 요청했어요 · {1}').format(ch["name"], ch["label"]))
+
+    def answer_ask(self, sid, ask, answers):
+        """세션톡(PC·휴대폰)에서 고른 답을 보낸다: 그 질문이 아직 열려 있을 때만. 대화에도 질문·답을 남긴다."""
+        cur = read_ask(sid)
+        if not cur or cur['id'] != ask['id']:
+            self.toast(T('이미 답한 질문이에요'), warn=True)
+            return False
+        try:
+            write_answer(sid, ask['id'], answers)
+        except OSError as ex:
+            self.toast(T('보내기 실패: {0}').format(ex), warn=True)
+            return False
+        with self.mon.lock:
+            s = self.mon.sessions.get(sid)
+            name = self.mon.display_name(s) if s else sid[:8]
+            qtext = '\n\n'.join('❓ **' + q['question'] + '**\n' + '\n'.join(f'- {o["label"]}' for o in q['options'])
+                                 for q in cur['questions'])
+            now = time.time()
+            self.mon.chat[f'ask-{ask["id"]}'] = {'id': f'ask-{ask["id"]}', 'from': sid, 'to': 'user', 'fromLabel': name, 'toLabel': T('나'),
+                                                 'kind': 'question', 'text': qtext, 'ts': (cur['at'] / 1000) or now - 1}
+            self.mon.chat[f'ask-{ask["id"]}-a'] = {'id': f'ask-{ask["id"]}-a', 'from': 'user', 'to': sid, 'fromLabel': T('나'),
+                                                   'toLabel': name, 'kind': 'answer', 'text': ' / '.join(answers.values()), 'ts': now,
+                                                   'read': True}
+            self.mon.chat_ver += 1
+        self.toast(T('{0}에 답했어요 · {1}').format(name, ' / '.join(answers.values())))
+        return True
 
     def sec_result(self, key):
         """비서 제안으로 세션에 맡긴 일의 결과: {state: sent|working|done|off, sid, name, label, ts, answer} 또는 None.

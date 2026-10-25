@@ -65,6 +65,9 @@ const STR = {
   pinOff: ['고정을 풀었어요', 'Unpinned', '固定を解除しました', '已取消置顶'],
   tyWork: ['작업 중', 'Working', '作業中', '工作中'], tyWait: ['확인을 기다리는 중', 'Waiting for approval', '承認待ち', '等待确认'],
   olderN: ['↑ 이전 대화 {0}개 더 보기', '↑ Show {0} earlier messages', '↑ 以前の会話をあと{0}件', '↑ 再显示 {0} 条早先消息'],
+  askHint: ['→ 나 · 고르면 바로 이어서 진행해요', '→ me · pick to continue', '→ 自分 · 選ぶとすぐ続きます', '→ 我 · 选择后立即继续'],
+  askFree: ['✎ 직접 입력…', '✎ Type my own…', '✎ 自分で入力…', '✎ 自行输入…'], askSend: ['답 보내기', 'Send answer', '回答を送る', '发送回答'],
+  askSent: ['보냈어요 · {0}', 'Sent · {0}', '送信しました · {0}', '已发送 · {0}'], askPh: ['직접 쓸 답', 'Your answer', '自分の回答', '你的回答'],
   members: ['대화상대', 'Members', 'メンバー', '成员'], searchName: ['이름 검색', 'Search names', '名前で検索', '搜索名称'],
   allRoom: ['전체 채팅방', 'All chats', '全体チャット', '全部聊天'], allRoomSub: ['모든 세션의 대화를 한곳에서', 'Every session in one place', 'すべてのセッションの会話をまとめて', '所有会话的对话'],
   sessionsN: ['세션 {0}', 'Sessions {0}', 'セッション {0}', '会话 {0}'], noMatch: ['찾는 세션이 없어요', 'No matching session', '該当するセッションがありません', '没有匹配的会话'],
@@ -958,6 +961,51 @@ function fillDrawer() {
     d = null;
   });
 })();
+// Claude가 고르라고 묻는 질문(AskUserQuestion): 선택지를 누르면 그 답으로 이어 간다 (여럿 고르기·직접 입력도)
+const askSel = {}, askSent = {};
+function askCard(a) {
+  const sel = askSel[a.id] || (askSel[a.id] = {});
+  const s = state && state.sessions.find(q => q.sid === a.sid);
+  const multi = a.questions.length > 1 || a.questions.some(q => q.multiSelect);
+  const card = h('div', { class: 'b ask-card' });
+  const send = async () => {
+    const answers = {};
+    a.questions.forEach((q, qi) => {
+      const picked = sel[qi] || [];
+      const labels = q.options.map(o => o.label).filter(l => picked.includes(l)).concat(picked.filter(x => !q.options.some(o => o.label === x)));
+      if (labels.length) answers[q.question] = labels.join(', ');
+    });
+    if (!Object.keys(answers).length) return;
+    try {
+      const r = await api('/api/answer', { sid: a.sid, id: a.id, answers });
+      if (r.ok) { askSent[a.id] = Object.values(answers).join(' / '); buzz(15); toast(t('sent')); }
+      refreshChat(true);
+    } catch (e) { toast(t('err', e.message), true); }
+  };
+  a.questions.forEach((q, qi) => {
+    const picked = sel[qi] || [];
+    if (q.header) card.append(h('span', { class: 'ask-head', text: q.header }));
+    card.append(h('div', { class: 'ask-q', text: q.question }));
+    q.options.forEach((o, oi) => {
+      const on = picked.includes(o.label);
+      card.append(h('button', { class: 'ask-opt' + (on ? ' on' : ''), disabled: !!askSent[a.id], onclick: () => {
+        if (q.multiSelect) sel[qi] = on ? picked.filter(x => x !== o.label) : [...picked, o.label];
+        else sel[qi] = [o.label];
+        buzz();
+        if (!multi) send(); else drawChat(false);
+      } }, h('b', { text: (q.multiSelect ? (on ? '☑ ' : '☐ ') : on ? '● ' : `${oi + 1}. `) + o.label }), o.description ? h('small', { text: o.description }) : null));
+    });
+    const free = picked.find(x => !q.options.some(o => o.label === x));
+    const inp = h('input', { class: 'ask-free', placeholder: t('askPh'), value: free || '', enterkeyhint: 'send' });
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter' && inp.value.trim()) { sel[qi] = [inp.value.trim()]; if (!multi) send(); else drawChat(false); } });
+    inp.addEventListener('change', () => { if (inp.value.trim()) sel[qi] = [...(sel[qi] || []).filter(x => q.options.some(o => o.label === x) && q.multiSelect), inp.value.trim()]; });
+    if (!askSent[a.id]) card.append(h('details', { class: 'ask-more', open: !!free }, h('summary', { text: t('askFree') }), inp));
+  });
+  if (askSent[a.id]) card.append(h('div', { class: 'ask-sent', text: t('askSent', askSent[a.id]) }));
+  else if (multi) card.append(h('button', { class: 'btn pri block', style: 'margin-top:8px', disabled: !a.questions.every((q, qi) => (sel[qi] || []).length), text: t('askSend'), onclick: send }));
+  return h('div', { class: 'msg other ask' }, h('div', { class: 'who', text: (s ? s.name : '') + ' ' + t('askHint') }), card);
+}
+
 // 지금 답을 만드는 중인 세션: CLI 아래 줄처럼 '✻ 작업 중… (6m 2s · ↓ 26.8k tokens)' + 지금 쓰는 도구
 let chatRecv = 0, spinN = 0;
 const SPIN = '·✢✳✶✻✽✻✶✳✢';
@@ -1060,6 +1108,7 @@ function drawChat(scroll) {
       h('div', { class: 'b md' }, md(m.text)),
       h('div', { class: 'meta', text: (me && m.read ? t('read') + ' · ' : '') + ago(m.ts) })));
   });
+  (chatData.asks || []).filter(a => room === '*' || a.sid === room).forEach(a => box.append(askCard(a)));
   (chatData.typing || []).filter(x => room === '*' || x.sid === room).forEach(x => {
     const s = state && state.sessions.find(q => q.sid === x.sid);
     box.append(h('div', { class: 'msg other' }, h('div', { class: 'who', text: s ? s.name : '' }),

@@ -257,3 +257,29 @@ test('기본 할 일 도구(TaskCreate/TaskUpdate)로 만든 단계도 패널에
   expect(await ui.find({ type: 'Text', text: /캐릭터 B — 진행중/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('Claude가 고르라고 물으면 세션톡에서 골라 답할 수 있다', async ($, on) => {
+  const clock = mock.clock(on)
+  const { files } = world(on)
+  on('tool.call', { tool: 'AskUserQuestion' }, async () => new Promise(() => {}) as never) // 터미널에서는 아직 고르지 않음
+  const questions = [{ question: '어느 쪽으로 할까요?', header: '방향', multiSelect: false, options: [{ label: 'A' }, { label: 'B' }] }]
+  const pending = $.tool.call({ tool: 'AskUserQuestion', questions } as never)
+  await clock.advance(100)
+  const ask = JSON.parse(files.get(`${DIR}\\ask-sess-a.json`) ?? '{}')
+  expect(ask.questions[0].question).toBe('어느 쪽으로 할까요?')
+  files.set(`${DIR}\\answer-sess-a.json`, JSON.stringify({ id: ask.id, answers: { '어느 쪽으로 할까요?': 'B' } }))
+  await clock.advance(1000)
+  const ran = (await pending) as { result?: { answers?: Record<string, string> } }
+  expect(ran.result?.answers?.['어느 쪽으로 할까요?']).toBe('B')
+  expect(JSON.parse(files.get(`${DIR}\\ask-sess-a.json`) ?? '{}').done).toBe(true)
+})
+
+test('터미널에서 먼저 고르면 그 답으로 이어 가고 물음은 닫힌다', async ($, on) => {
+  const clock = mock.clock(on)
+  const { files } = world(on)
+  on('tool.call', { tool: 'AskUserQuestion' }, async () => ({ result: { questions: [], answers: { q: 'A' } } }) as never)
+  const ran = (await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)) as { result?: { answers?: Record<string, string> } }
+  await clock.advance(1000)
+  expect(ran.result?.answers?.q).toBe('A')
+  expect(JSON.parse(files.get(`${DIR}\\ask-sess-a.json`) ?? '{}').done).toBe(true)
+})

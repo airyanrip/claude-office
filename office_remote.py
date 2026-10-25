@@ -1107,8 +1107,10 @@ def api_chat(r, dev, q, body):
                 'kind': m.get('kind', ''), 'text': _clip(m.get('text'), 3000), 'ts': m['ts'], 'read': bool(m.get('read')),
                 'reply': bool(m.get('reply'))} for m in msgs[-80:]]
         now = time.time()  # 일하는 중: 휴대폰은 받은 뒤로 흐른 시간만 더한다 (시계가 달라도 맞게)
+        asks = [{'sid': sid, 'id': a['id'], 'questions': a['questions']} for sid, a in (getattr(fake, 'asks', {}) or {}).items()
+                if room in ('*', sid)]
         return {'msgs': out, 'typing': [{'sid': k, 'el': round(now - v['start'], 1), 'tok': v['tok'], 'tool': _clip(v['tool'], 80),
-                                         'mode': v['mode']} for k, v in sorted(typing.items())]}
+                                         'mode': v['mode']} for k, v in sorted(typing.items())], 'asks': asks}
 
     return r.ui(build)
 
@@ -1125,6 +1127,18 @@ def api_send(r, dev, q, body):
         return {'ok': True}
 
     return r.ui(run)
+
+
+def api_answer(r, dev, q, body):
+    """Claude의 선택지 질문에 답한다 (세션톡과 같은 길: answer-<세션>.json 을 mod가 읽는다)."""
+    sid, ask_id = str(body.get('sid') or ''), str(body.get('id') or '')
+    raw = body.get('answers')
+    if not re.fullmatch(r'[0-9a-f-]{8,40}', sid) or not ask_id or not isinstance(raw, dict) or not raw or len(raw) > 4:
+        raise ValueError('answer')
+    answers = {_clip(k, 600): _clip(v, 2000) for k, v in raw.items() if isinstance(k, str) and isinstance(v, str) and v.strip()}
+    if not answers:
+        raise ValueError('answer')
+    return r.ui(lambda: {'ok': bool(r.app.answer_ask(sid, {'id': ask_id}, answers))})
 
 
 def api_brief(r, dev, q, body):
@@ -1302,6 +1316,7 @@ def api_alerts(r, dev, q, body):
 API = {
     ('GET', '/api/state'): api_state, ('GET', '/api/session'): api_session, ('GET', '/api/chat'): api_chat,
     ('POST', '/api/send'): api_send, ('POST', '/api/brief'): api_brief, ('POST', '/api/choice'): api_choice,
+    ('POST', '/api/answer'): api_answer,
     ('POST', '/api/secmark'): api_secmark, ('POST', '/api/meeting/start'): api_meet_start,
     ('POST', '/api/meeting/end'): api_meet_end, ('POST', '/api/meeting/presented'): api_meet_presented,
     ('GET', '/api/img'): api_img, ('GET', '/api/sprite'): api_sprite, ('GET', '/api/past'): api_past,

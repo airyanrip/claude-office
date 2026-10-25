@@ -43,6 +43,10 @@ const peers = atom({ plugin: 'session-panel', key: 'peers' } as const, [])
 const messages = atom({ plugin: 'session-panel', key: 'messages' } as const, [])
 const outbox = atom({ plugin: 'session-panel', key: 'outbox' } as const, [])
 const seen = atom({ plugin: 'session-panel', key: 'seen' } as const, [])
+// 이 프로세스가 뜬 시각 · 받은 메시지 id 파일을 읽었는지 — 세션을 다시 열면(재부팅 · 이어서 열기) 상태 값은 옛 시작 시각만 남고
+// 받은 id 목록은 비어서, 이미 전한 메시지(사용자 명령 포함)를 다시 전하던 문제를 막는다
+let processStart = 0
+let seenLoaded = false
 const isAutoReply = atom({ plugin: 'session-panel', key: 'isAutoReply' } as const, false)
 const autoReplies = atom({ plugin: 'session-panel', key: 'autoReplies' } as const, [])
 // 작업판을 누가 채웠는지 (progress 보고가 있으면 기본 할 일 도구로는 덮지 않는다)
@@ -439,8 +443,16 @@ const sync = async ($: EngineInterface): Promise<void> => {
   await update($, inbox, () => notes.sort((a, b) => b.createdAt - a.createdAt))
   await update($, now, () => time)
 
-  // 나에게 온 것 중 아직 못 본 것을 전한다 (전체 공지는 이 세션이 열린 뒤 것만, 나를 지목한 건 2시간 전 것까지)
-  const since = await read($, startedAt)
+  // 나에게 온 것 중 아직 못 본 것을 전한다 (전체 공지는 이 세션이 열린 뒤 것만, 나를 지목한 건 이 프로세스가 뜨기 2시간 전 것까지)
+  const since = Math.max(await read($, startedAt), processStart)
+  const seenPath = `${dir}/seen-${me}.json`
+  if (!seenLoaded) {
+    const saved = await readJson<string[]>($, seenPath)
+    if (Array.isArray(saved)) {
+      await update($, seen, list => [...new Set([...saved, ...list])].slice(-1000))
+    }
+    seenLoaded = true
+  }
   const already = new Set(await read($, seen))
   const fresh = incoming
     .filter(m => !already.has(m.id))
@@ -450,6 +462,7 @@ const sync = async ($: EngineInterface): Promise<void> => {
     return
   }
   await update($, seen, list => [...list, ...fresh.map(m => m.id)].slice(-1000))
+  await $.fs.write(seenPath, JSON.stringify(await read($, seen))).catch(() => {})
   for (const m of fresh) {
     await deliver($, m, found.find(p => p.sessionId === m.from)).catch(() => {})
   }
@@ -712,14 +725,19 @@ export const register: Register = on => {
     const setup = async () => {
       const where = await $.session.root().catch(() => '')
       await update($, root, () => where)
+      const time = await $.clock.now()
+      if (processStart === 0) {
+        processStart = time
+      }
       if ((await read($, startedAt)) === 0) {
-        const time = await $.clock.now()
         await update($, startedAt, () => time)
       }
       await mySession($)
       await sync($)
     }
     await setup().catch(() => {})
+    // 세션을 켜면 패널도 바로 연다 (/panel을 따로 치지 않아도 됨 · 패널을 못 띄우는 환경이면 그냥 넘어감)
+    await $.ui.open({ id: PANE, title: TITLE }).catch(() => {})
     // 다른 세션들의 상태·메시지를 받으려고 협업 폴더를 주기적으로 다시 읽는다
     $.clock.every(SYNC_MS, () => sync($).catch(() => {}))
 
@@ -946,6 +964,42 @@ export const register: Register = on => {
     }
 
     return next(e)
+  })
+
+  // Claude가 고르라고 물을 때(AskUserQuestion): 세션 사무실 세션톡에서도 골라 답할 수 있게 한다.
+  // 물음을 협업 폴더 ask-<세션>.json 에 적어 두고, 터미널에서 고르든 세션톡이 answer-<세션>.json 에 답을 적든 먼저 온 쪽으로 이어 간다
+  on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
+    if (e.agentId !== undefined) {
+      return next(e)
+    }
+    const dir = await collabDir($)
+    const me = await mySession($)
+    const askPath = `${dir}/ask-${me}.json`
+    const answerPath = `${dir}/answer-${me}.json`
+    const id = e.tool_use_id
+    const questions = (e as Record<string, unknown>).questions
+    await $.fs.write(askPath, JSON.stringify({ id, questions, at: await $.clock.now() })).catch(() => {})
+    let isSettled = false
+    const fromTerminal = next(e).then(ran => ({ by: 'terminal' as const, ran }))
+    const fromOffice = (async () => {
+      while (!isSettled) {
+        await $.clock.sleep(700, { signal: next.signal }).catch(() => {
+          isSettled = true
+        })
+        const got = isSettled ? undefined : await readJson<{ id?: string; answers?: Record<string, string> }>($, answerPath)
+        if (got?.id === id && got.answers !== undefined && typeof got.answers === 'object') {
+          return { by: 'office' as const, answers: got.answers }
+        }
+      }
+      return new Promise<never>(() => {})
+    })()
+    try {
+      const won = await Promise.race([fromTerminal, fromOffice])
+      return won.by === 'office' ? ({ result: { questions, answers: won.answers } } as never) : won.ran
+    } finally {
+      isSettled = true
+      await $.fs.write(askPath, JSON.stringify({ id, done: true, at: await $.clock.now() })).catch(() => {})
+    }
   })
 
   on('tool.call', async ($, e, next) => {
