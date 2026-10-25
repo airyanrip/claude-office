@@ -103,6 +103,10 @@ def scan(path, data, words):
 
 
 def main():
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except (AttributeError, ValueError):
+        pass
     everything = '--all' in sys.argv
     words = personal_words()
     if everything:
