@@ -42,6 +42,10 @@ const STR = {
   pcCode: ['PC 확인 코드 {0}', 'PC code {0}', 'PC確認コード {0}', '电脑确认码 {0}'],
   pcCodeSub: ['PC 원격 조종 화면의 코드와 같은지 확인하세요', 'Check that it matches the code in Remote on your PC', 'PCのリモート操作画面のコードと同じか確認してください', '请确认与电脑远程控制中显示的一致'],
   netErr: ['PC에 닿지 못했어요', 'Could not reach the PC', 'PCに接続できませんでした', '无法连接到电脑'],
+  zoomHint: ['두 번 탭하거나 두 손가락으로 확대 · 아래로 끌면 닫혀요', 'Double-tap or pinch to zoom · drag down to close', 'ダブルタップかピンチで拡大 · 下にドラッグで閉じる', '双击或双指缩放 · 向下拖动关闭'],
+  pinMeet: ['회의실 화면 고정', 'Pin the meeting scene', '会議室の画面を固定', '固定会议室画面'],
+  pinnedMeet: ['회의실 화면을 위에 고정했어요', 'Meeting scene pinned to the top', '会議室の画面を上に固定しました', '已将会议室画面固定在顶部'],
+  unpinnedMeet: ['고정을 풀었어요', 'Unpinned', '固定を解除しました', '已取消固定'],
   members: ['대화상대', 'Members', 'メンバー', '成员'], searchName: ['이름 검색', 'Search names', '名前で検索', '搜索名称'],
   allRoom: ['전체 채팅방', 'All chats', '全体チャット', '全部聊天'], allRoomSub: ['모든 세션의 대화를 한곳에서', 'Every session in one place', 'すべてのセッションの会話をまとめて', '所有会话的对话'],
   sessionsN: ['세션 {0}', 'Sessions {0}', 'セッション {0}', '会话 {0}'], noMatch: ['찾는 세션이 없어요', 'No matching session', '該当するセッションがありません', '没有匹配的会话'],
@@ -663,6 +667,160 @@ function viewTalk(v) {
   }
   drawChat();
 }
+// ───────────── 그림 크게 보기 ─────────────
+// 두 손가락으로 벌리거나 두 번 탭하면 확대, 확대한 채로 끌면 이동, 확대 안 한 채로 좌우로 넘기면 다음 그림,
+// 아래로 끌거나 바깥을 누르거나 ✕·뒤로 가기로 닫는다. PC 미리보기 창에서는 휠 확대·끌기·화살표·Esc.
+const vw = { mid: '', names: [], i: 0, s: 1, tx: 0, ty: 0 };
+function openViewer(mid, names, i) {
+  if (!names || !names.length) return;
+  Object.assign(vw, { mid, names: names.slice(), i, s: 1, tx: 0, ty: 0 });
+  const box = $('#viewer');
+  box.textContent = '';
+  const img = h('img', { class: 'vw-img', alt: '', draggable: 'false' });
+  const count = h('span', { class: 'vw-count' });
+  box.append(h('div', { class: 'vw-top' }, count, h('button', { class: 'icon-btn vw-x', 'aria-label': 'close', text: '✕', onclick: closeViewer })),
+    h('div', { class: 'vw-stage' }, img),
+    names.length > 1 ? h('button', { class: 'vw-nav prev', 'aria-label': 'prev', text: '‹', onclick: e => { e.stopPropagation(); vwGo(-1); } }) : null,
+    names.length > 1 ? h('button', { class: 'vw-nav next', 'aria-label': 'next', text: '›', onclick: e => { e.stopPropagation(); vwGo(1); } }) : null,
+    h('div', { class: 'vw-hint', text: t('zoomHint') }));
+  box.hidden = false;
+  box.classList.remove('out');
+  document.documentElement.style.overflow = 'hidden';
+  history.pushState({ viewer: 1 }, '');
+  vwShow();
+  buzz();
+}
+function vwShow() {
+  const img = $('#viewer .vw-img');
+  if (!img) return;
+  vw.s = 1; vw.tx = 0; vw.ty = 0;
+  vwApply(false);
+  img.removeAttribute('src');
+  meetImg(vw.mid, vw.names[vw.i], img);
+  $('#viewer .vw-count').textContent = vw.names.length > 1 ? `${vw.i + 1} / ${vw.names.length}` : '';
+}
+function vwGo(d) {
+  if (vw.names.length < 2) return;
+  vw.i = (vw.i + d + vw.names.length) % vw.names.length;
+  vwShow();
+  buzz();
+}
+function vwClamp() {  // 확대한 그림이 화면 밖으로 다 나가지 않게
+  const img = $('#viewer .vw-img'), st = $('#viewer .vw-stage');
+  if (!img || !st) return;
+  const mx = Math.max(0, (img.offsetWidth * vw.s - st.clientWidth) / 2), my = Math.max(0, (img.offsetHeight * vw.s - st.clientHeight) / 2);
+  vw.tx = Math.max(-mx, Math.min(mx, vw.tx));
+  vw.ty = Math.max(-my, Math.min(my, vw.ty));
+}
+function vwApply(anim, dy = 0) {
+  const img = $('#viewer .vw-img');
+  if (!img) return;
+  img.style.transition = anim ? 'transform .22s cubic-bezier(.2,.8,.2,1)' : 'none';
+  img.style.transform = `translate(${vw.tx}px, ${vw.ty + dy}px) scale(${vw.s})`;
+  $('#viewer').style.background = dy ? `rgba(8,10,14,${Math.max(0.35, 0.96 - Math.abs(dy) / 500)})` : '';
+}
+function vwZoomAt(s2, px, py) {  // (px,py) = 화면 가운데 기준 위치. 그 점이 손가락 아래에 머물도록
+  s2 = Math.max(1, Math.min(5, s2));
+  vw.tx = px - (px - vw.tx) * (s2 / vw.s);
+  vw.ty = py - (py - vw.ty) * (s2 / vw.s);
+  vw.s = s2;
+  if (vw.s === 1) { vw.tx = 0; vw.ty = 0; }
+  vwClamp();
+}
+function closeViewer(fromPop) {
+  const box = $('#viewer');
+  if (box.hidden) return;
+  box.classList.add('out');
+  setTimeout(() => { box.hidden = true; box.textContent = ''; box.style.background = ''; if ($('#sheet').hidden && $('#drawer').hidden) document.documentElement.style.overflow = ''; }, 180);
+  if (fromPop !== true && history.state && history.state.viewer) history.back();
+}
+window.addEventListener('popstate', () => closeViewer(true));
+document.addEventListener('keydown', e => {
+  if ($('#viewer').hidden) return;
+  if (e.key === 'Escape') closeViewer();
+  else if (e.key === 'ArrowLeft') vwGo(-1);
+  else if (e.key === 'ArrowRight') vwGo(1);
+});
+(function viewerGestures() {
+  const box = $('#viewer');
+  let g = null, lastTap = 0;
+  const center = () => { const r = $('#viewer .vw-stage').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; };
+  const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  box.addEventListener('touchstart', e => {
+    if (e.target.closest('button')) { g = null; return; }
+    const t = e.touches;
+    if (t.length === 2) {
+      const [cx, cy] = center();
+      g = { mode: 'pinch', d0: dist(t), s0: vw.s, tx0: vw.tx, ty0: vw.ty, mx: (t[0].clientX + t[1].clientX) / 2 - cx, my: (t[0].clientY + t[1].clientY) / 2 - cy };
+    } else if (t.length === 1) {
+      g = { mode: null, x: t[0].clientX, y: t[0].clientY, tx0: vw.tx, ty0: vw.ty, t: Date.now(), dx: 0, dy: 0, onImg: !!e.target.closest('.vw-img') };
+    }
+  }, { passive: true });
+  box.addEventListener('touchmove', e => {
+    if (!g) return;
+    e.preventDefault();
+    const t = e.touches;
+    if (g.mode === 'pinch' && t.length === 2) {
+      vw.s = g.s0; vw.tx = g.tx0; vw.ty = g.ty0;
+      vwZoomAt(g.s0 * dist(t) / g.d0, g.mx, g.my);
+      vwApply(false);
+      return;
+    }
+    if (t.length !== 1 || g.mode === 'pinch') return;
+    g.dx = t[0].clientX - g.x; g.dy = t[0].clientY - g.y;
+    if (!g.mode && Math.hypot(g.dx, g.dy) > 8) g.mode = vw.s > 1 ? 'pan' : Math.abs(g.dx) > Math.abs(g.dy) ? 'swipe' : 'close';
+    if (g.mode === 'pan') { vw.tx = g.tx0 + g.dx; vw.ty = g.ty0 + g.dy; vwClamp(); vwApply(false); }
+    else if (g.mode === 'swipe') { vw.tx = g.dx; vwApply(false); }
+    else if (g.mode === 'close') vwApply(false, Math.max(0, g.dy));
+  }, { passive: false });
+  box.addEventListener('touchend', e => {
+    if (!g || e.touches.length) { if (g && g.mode === 'pinch' && e.touches.length === 1) g = null; return; }
+    const d = g;
+    g = null;
+    e.preventDefault();  // 터치 뒤에 브라우저가 흉내 내는 마우스 클릭·더블클릭이 확대를 되돌리지 않게
+    if (d.mode === 'swipe') {
+      const fast = Math.abs(d.dx) / Math.max(1, Date.now() - d.t) > 0.4;
+      vw.tx = 0;
+      if (vw.names.length > 1 && (Math.abs(d.dx) > 70 || (fast && Math.abs(d.dx) > 25))) vwGo(d.dx < 0 ? 1 : -1); else vwApply(true);
+    } else if (d.mode === 'close') {
+      if (d.dy > 110 || (d.dy > 30 && d.dy / Math.max(1, Date.now() - d.t) > 0.5)) closeViewer(); else vwApply(true);
+    } else if (!d.mode) {  // 탭
+      const now = Date.now();
+      if (d.onImg && now - lastTap < 300) {
+        const [cx, cy] = center();
+        if (vw.s > 1) { vw.s = 1; vw.tx = 0; vw.ty = 0; } else vwZoomAt(2.5, d.x - cx, d.y - cy);
+        vwApply(true);
+        lastTap = 0;
+      } else {
+        lastTap = now;
+        if (!d.onImg && vw.s === 1) closeViewer();
+      }
+    }
+  });
+  // 마우스 (PC 미리보기 창)
+  box.addEventListener('wheel', e => {
+    if (box.hidden) return;
+    e.preventDefault();
+    const [cx, cy] = center();
+    vwZoomAt(vw.s * (e.deltaY < 0 ? 1.2 : 1 / 1.2), e.clientX - cx, e.clientY - cy);
+    vwApply(false);
+  }, { passive: false });
+  let md = null;
+  box.addEventListener('mousedown', e => { if (e.button === 0 && !e.target.closest('button')) md = { x: e.clientX, y: e.clientY, tx0: vw.tx, ty0: vw.ty, moved: false, onImg: !!e.target.closest('.vw-img') }; });
+  window.addEventListener('mousemove', e => {
+    if (!md || vw.s === 1) return;
+    md.moved = md.moved || Math.hypot(e.clientX - md.x, e.clientY - md.y) > 4;
+    vw.tx = md.tx0 + e.clientX - md.x; vw.ty = md.ty0 + e.clientY - md.y; vwClamp(); vwApply(false);
+  });
+  window.addEventListener('mouseup', () => { if (md && !md.moved && !md.onImg && vw.s === 1) closeViewer(); md = null; });
+  box.addEventListener('dblclick', e => {
+    if (!e.target.closest('.vw-img')) return;
+    const [cx, cy] = center();
+    if (vw.s > 1) { vw.s = 1; vw.tx = 0; vw.ty = 0; } else vwZoomAt(2.5, e.clientX - cx, e.clientY - cy);
+    vwApply(true);
+  });
+})();
+
 // 마우스로도 끌어서 넘긴다 (손가락은 브라우저가 직접 굴린다). 끌었으면 손을 뗄 때의 클릭은 무시한다.
 function dragScroll(el) {
   let d = null;
@@ -773,6 +931,55 @@ async function refreshChat(force) {
     drawChat(true);
   } catch (e) { /* 다음 폴링 때 */ }
 }
+// ── 마크다운 (Claude Code 터미널처럼): 굵게·기울임·코드·코드 블록·제목·목록·인용·링크·취소선. 글자는 textContent로만 넣는다 ──
+const MD_INLINE = /\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__|`([^`\n]+)`|~~(?=\S)(.+?)(?<=\S)~~|\[([^\]\n]+)\]\(([^)\s]+)\)|(?<![*\w])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![*\w])|(?<![_\w])_(?=\S)([^_\n]+?)(?<=\S)_(?![_\w])/g;
+function mdInline(s) {
+  const out = [];
+  let pos = 0;
+  for (const m of s.matchAll(MD_INLINE)) {
+    if (m.index > pos) out.push(document.createTextNode(s.slice(pos, m.index)));
+    if (m[1] != null || m[2] != null) out.push(h('b', {}, mdInline(m[1] ?? m[2])));
+    else if (m[3] != null) out.push(h('code', { text: m[3] }));
+    else if (m[4] != null) out.push(h('s', {}, mdInline(m[4])));
+    else if (m[5] != null) {
+      const ok = /^https?:\/\//i.test(m[6]);  // 웹 주소만 링크로 (javascript: 등은 글자로)
+      out.push(ok ? h('a', { href: m[6], target: '_blank', rel: 'noopener noreferrer' }, mdInline(m[5])) : h('span', {}, mdInline(m[5])));
+    } else out.push(h('i', {}, mdInline(m[7] ?? m[8])));
+    pos = m.index + m[0].length;
+  }
+  if (pos < s.length) out.push(document.createTextNode(s.slice(pos)));
+  return out;
+}
+function md(text) {
+  const frag = document.createDocumentFragment();
+  let code = null, list = null;
+  const endList = () => { list = null; };
+  for (const ln of String(text || '').replace(/\r/g, '').split('\n')) {
+    const st = ln.trim();
+    if (st.startsWith('```')) {
+      if (code) { code = null; } else { endList(); code = h('code', {}); frag.append(h('pre', {}, code)); }
+      continue;
+    }
+    if (code) { code.append((code.textContent ? '\n' : '') + ln); continue; }
+    if (!st) { endList(); continue; }
+    let m;
+    if ((m = st.match(/^(#{1,6})\s+(.*)/))) { endList(); frag.append(h('div', { class: 'md-h' }, mdInline(m[2]))); continue; }
+    if (/^((-\s*){3,}|(\*\s*){3,}|(_\s*){3,})$/.test(st)) { endList(); frag.append(h('hr')); continue; }
+    if ((m = ln.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)/))) {
+      const ordered = !/[-*+]/.test(m[2]);
+      const depth = Math.min(3, Math.floor(m[1].replace(/\t/g, '    ').length / 2));
+      if (!list) { list = h('div', { class: 'md-list' }); frag.append(list); }
+      list.append(h('div', { class: 'md-li', style: `padding-left:${depth * 14 + 14}px` },
+        h('span', { class: 'md-mark', text: ordered ? m[2] : '•' }), mdInline(m[3])));
+      continue;
+    }
+    endList();
+    if ((m = st.match(/^>\s?(.*)/))) { frag.append(h('div', { class: 'md-q' }, mdInline(m[1]))); continue; }
+    if (st.startsWith('|') && st.endsWith('|')) { frag.append(h('div', { class: 'md-table', text: st })); continue; }
+    frag.append(h('div', {}, mdInline(ln)));
+  }
+  return frag;
+}
 function drawChat(scroll) {
   const box = $('#chat');
   if (!box) return;
@@ -783,7 +990,7 @@ function drawChat(scroll) {
     const me = m.from === 'user';
     box.append(h('div', { class: 'msg ' + (me ? 'me' : 'other') },
       me ? null : h('div', { class: 'who', text: (m.fromLabel || '') + (room === '*' && m.toLabel ? ' → ' + m.toLabel : '') }),
-      h('div', { class: 'b', text: m.text }),
+      h('div', { class: 'b md' }, md(m.text)),
       h('div', { class: 'meta', text: (me && m.read ? t('read') + ' · ' : '') + ago(m.ts) })));
   });
   if (chatData.typing.length && (room === '*' || chatData.typing.includes(room))) box.append(h('div', { class: 'typing' }, h('i'), h('i'), h('i')));
@@ -824,9 +1031,24 @@ function viewSec(v) {
 let meetPick = new Set(JSON.parse(localStorage.getItem('co.meetPick') || '[]')), meetTurns = 3;
 let talk = { sid: null, pages: [], pi: 0, n: 0, timer: null, text: '' };
 const ST = { done: ['stDone', '#2fb985'], partial: ['stPartial', '#f0a020'], todo: ['stTodo', '#e8505b'] };
+// 회의실 장면(무대+대사 창)을 핀으로 위에 고정: 회의록을 내려 읽어도 발표가 보인다 (기기에 기억)
+let meetPin = localStorage.getItem('co.meetPin') === '1';
+const PIN_SVG = '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M15 3l6 6-3 1-4 4 1 5-2 2-4-4-5 5-1-1 5-5-4-4 2-2 5 1 4-4z" fill="currentColor"/></svg>';
 function viewMeet(v) {
   const m = state.meeting;
-  v.append(stage(m), dialog(m));
+  const top = h('div', { class: 'meet-top' + (meetPin ? ' pinned' : '') });
+  const pin = h('button', { class: 'pin-btn' + (meetPin ? ' on' : ''), 'aria-label': 'pin', title: t('pinMeet'), onclick: e => {
+    e.stopPropagation();
+    meetPin = !meetPin;
+    localStorage.setItem('co.meetPin', meetPin ? '1' : '0');
+    top.classList.toggle('pinned', meetPin);
+    pin.classList.toggle('on', meetPin);
+    toast(t(meetPin ? 'pinnedMeet' : 'unpinnedMeet'));
+    buzz();
+  } });
+  pin.innerHTML = PIN_SVG;  // 고정 아이콘만 (PC 데이터 아님)
+  top.append(stage(m), dialog(m), pin);
+  v.append(top);
   if (!m) {
     const pick = h('div', { class: 'pick' });
     state.sessions.forEach(s => {
@@ -864,7 +1086,7 @@ function viewMeet(v) {
       card.append(h('div', { style: 'border-top:1px solid var(--edge);margin-top:10px;padding-top:8px' },
         h('div', {}, h('span', { class: 'st', style: 'background:' + st[1], text: t(st[0]) }), h('b', { text: it.request })),
         it.result ? h('div', { class: 'text2', style: 'font-size:14px;white-space:pre-wrap;margin-top:4px', text: it.result }) : null,
-        it.images.length ? h('div', { class: 'thumbs' }, it.images.map(n => meetImg(m.id, n, h('img', { alt: '' })))) : null));
+        it.images.length ? h('div', { class: 'thumbs' }, it.images.map((n, k) => meetImg(m.id, n, h('img', { alt: '', onclick: () => openViewer(m.id, it.images, k) })))) : null));
     });
     if (rep.next) card.append(h('div', { class: 'small', style: 'margin-top:8px', text: t('next') + rep.next }));
     v.append(card);
@@ -889,7 +1111,12 @@ function drawStage(m, st = $('#stage')) {
   st.textContent = '';
   const page = talk.pages[talk.pi];
   const scr = h('div', { class: 'screen' });
-  if (page && page.images && page.images.length && m) scr.append(meetImg(m.id, page.images[0], h('img', { alt: '' })));
+  if (page && page.images && page.images.length && m) {
+    scr.append(meetImg(m.id, page.images[0], h('img', { alt: '' })), h('span', { class: 'zoom-tag', text: '⤢' }));
+    scr.classList.add('tap');
+    const ims = page.images.slice();
+    scr.onclick = e => { e.stopPropagation(); openViewer(m.id, ims, 0); };
+  }
   else scr.textContent = talk.sid && m ? ((m.roster.find(r => r.sid === talk.sid) || {}).report || {}).title || '' : t('meet');
   const roster = m ? m.roster : state.sessions.filter(s => meetPick.has(s.sid)).map(s => ({ sid: s.sid, name: s.name, mode: s.mode }));
   const seats = h('div', { class: 'seats' });
@@ -1089,7 +1316,7 @@ function swipeX(el, onSwipe) {  // 좌우로 넘기기 (dir: 오른쪽으로 넘
   let g = null;
   const skip = '.rooms, .thumbs, .chips, .pick, textarea, input, select, .dialog, .seg, .composer';
   document.addEventListener('touchstart', e => {
-    if (!online || !state || !$('#sheet').hidden || !$('#drawer').hidden || e.touches.length > 1 || e.target.closest('#tabs, #top') || e.target.closest(skip)) { g = null; return; }
+    if (!online || !state || !$('#sheet').hidden || !$('#drawer').hidden || !$('#viewer').hidden || e.touches.length > 1 || e.target.closest('#tabs, #top') || e.target.closest(skip)) { g = null; return; }
     g = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now(), mode: null, dx: 0, dy: 0, top: window.scrollY <= 0 };
   }, { passive: true });
   document.addEventListener('touchmove', e => {

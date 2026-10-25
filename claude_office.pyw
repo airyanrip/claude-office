@@ -1508,6 +1508,7 @@ CHAT = {  # 세션톡 (카카오톡 풍)
     'empty': _t('#4f5d6b', '#8d99a8'), 'typing': _t('#6b7580', '#8d99a8'), 'input': _t('#ffffff', '#1b2129'),
     'input_fg': _t('#1e1e1e', '#e6ebf0'), 'input_edge': _t('#dfe3e8', '#2b343f'), 'chip': _t('#eef1f4', '#242c36'),
     'hint': _t('#8a929c', '#8d99a8'),
+    'code': _t('#b4235a', '#ff9ac1'), 'code_bg': _t('#eef1f4', '#202832'), 'link': _t('#1f6fd1', '#7db4ff'),  # 마크다운
 }
 
 
@@ -1655,6 +1656,185 @@ def ease_in_out(t):
 def ease_back(t):  # 살짝 지나쳤다가 제자리 (튀어나오는 것)
     c = 1.4
     return 1 + (c + 1) * (t - 1) ** 3 + c * (t - 1) ** 2
+
+
+# ── 마크다운 (Claude Code 터미널처럼 세션톡 말풍선에) ──
+MD_INLINE = re.compile(r'\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__|`([^`\n]+)`|~~(?=\S)(.+?)(?<=\S)~~'
+                       r'|\[([^\]\n]+)\]\(([^)\s]+)\)|(?<![*A-Za-z0-9])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![*A-Za-z0-9])|(?<![_A-Za-z0-9])_(?=\S)([^_\n]+?)(?<=\S)_(?![_A-Za-z0-9])')
+# (한국어 조사가 닫는 * 바로 뒤에 붙어도 기울임으로: 둘레 검사는 영문·숫자만)
+
+
+def md_plain(text, n=None):
+    """마크다운 기호를 걷어 낸 한 줄 (방 목록 미리보기 등)."""
+    out = []
+    for kind, prefix, runs in md_blocks(text):
+        if kind in ('gap', 'hr'):
+            continue
+        out.append((prefix.strip() + ' ' if prefix else '') + ''.join(t for t, _st in runs))
+    return one_line(' '.join(out), n)
+
+
+def md_inline(s, st=''):
+    """한 줄 → [(글자, 스타일)]. 스타일 글자: b 굵게, i 기울임, c 코드, s 취소선, u 링크."""
+    out, pos = [], 0
+    for m in MD_INLINE.finditer(s):
+        if m.start() > pos:
+            out.append((s[pos:m.start()], st))
+        g = m.groups()
+        if g[0] is not None or g[1] is not None:
+            out += md_inline(g[0] if g[0] is not None else g[1], st + 'b')
+        elif g[2] is not None:
+            out.append((g[2], st + 'c'))
+        elif g[3] is not None:
+            out += md_inline(g[3], st + 's')
+        elif g[4] is not None:
+            out += md_inline(g[4], st + 'u')
+        else:
+            out += md_inline(g[6] if g[6] is not None else g[7], st + 'i')
+        pos = m.end()
+    if pos < len(s):
+        out.append((s[pos:], st))
+    return out
+
+
+def md_blocks(text):
+    """줄 단위 블록 [(종류, 앞머리, [(글자, 스타일)])]. 종류: p 문단, h 제목, li 목록, q 인용, code 코드 블록, hr 줄, gap 빈 줄."""
+    out, code = [], False
+    for ln in text.replace('\r', '').split('\n'):
+        st = ln.strip()
+        if st.startswith('```'):
+            code = not code
+            continue
+        if code:
+            out.append(('code', '', [(ln.expandtabs(4) or ' ', 'c')]))
+            continue
+        if not st:
+            if out and out[-1][0] != 'gap':
+                out.append(('gap', '', []))
+            continue
+        m = re.match(r'(#{1,6})\s+(.*)', st)
+        if m:
+            out.append(('h', '', md_inline(m.group(2), 'b')))
+            continue
+        if re.fullmatch(r'(-\s*){3,}|(\*\s*){3,}|(_\s*){3,}', st):
+            out.append(('hr', '', []))
+            continue
+        m = re.match(r'(\s*)([-*+]|\d+[.)])\s+(.*)', ln)
+        if m:
+            mark = '•' if m.group(2) in '-*+' else m.group(2)
+            out.append(('li', '    ' * min(3, len(m.group(1).expandtabs(4)) // 2) + mark + ' ', md_inline(m.group(3))))
+            continue
+        m = re.match(r'>\s?(.*)', st)
+        if m:
+            out.append(('q', '', md_inline(m.group(1))))
+            continue
+        if st.startswith('|') and st.endswith('|'):  # 표는 고정폭 글자로 그대로
+            out.append(('code', '', [(st, 'c')]))
+            continue
+        out.append(('p', '', md_inline(ln.rstrip())))
+    while out and out[-1][0] == 'gap':
+        out.pop()
+    return out
+
+
+_MD_TOKEN = re.compile(r'\s+|[A-Za-z0-9_\-./:@#%&+=?!,;\'"()\[\]{}<>~^$*|\\]+|.')
+
+
+def md_layout(text, maxw, fonts):
+    """마크다운을 maxw 안에 줄바꿈해 그릴 조각들로. ([('t', x, y, 글자, 스타일) | ('bg', x0, y0, x1, y1) | ('bar', x, y0, y1)
+    | ('hr', x0, x1, y)], 너비, 높이). 좌표는 왼쪽 위 기준."""
+    fb, fbb, fi, fm = fonts['body'], fonts['bodyb'], fonts['bodyi'], fonts['mono']
+    lh = max(fb.metrics('linespace'), fm.metrics('linespace'))
+    font_of = lambda s: fm if 'c' in s else fbb if 'b' in s else fi if 'i' in s else fb
+    ops, y, used = [], 0, 0
+    for kind, prefix, runs in md_blocks(text):
+        if kind == 'gap':
+            y += lh * 0.4
+            continue
+        if kind == 'hr':
+            ops.append(('hr', 0, maxw, y + lh / 2))
+            used = max(used, maxw * 0.5)
+            y += lh
+            continue
+        left = 0
+        if prefix:
+            ops.append(('t', 0, y, prefix, ''))
+            left = fb.measure(prefix)
+        if kind == 'q':
+            left = 12
+        y0, x = y, left
+        seg = None  # [x, 글자, 스타일]
+
+        def flush():
+            nonlocal seg
+            if seg and seg[1]:
+                ops.append(('t', seg[0], y, seg[1], seg[2]))
+            seg = None
+
+        for s, st in runs:
+            f = font_of(st)
+            for tok in _MD_TOKEN.findall(s):
+                pieces = [tok] if f.measure(tok) <= maxw - left else list(tok)  # 아주 긴 낱말(주소 등)은 글자 단위로
+                for p in pieces:
+                    w = f.measure(p)
+                    if x + w > maxw and x > left:
+                        flush()
+                        used = max(used, x)
+                        y += lh
+                        x = left
+                        if p.isspace():
+                            continue
+                    if seg and seg[2] == st:
+                        seg[1] += p
+                    else:
+                        flush()
+                        seg = [x, p, st]
+                    x += w
+        flush()
+        used = max(used, x)
+        y += lh
+        if kind == 'q':
+            ops.append(('bar', 3, y0 + 2, y - 2))
+        if kind == 'code':  # 코드 블록 줄은 바탕을 끝까지
+            ops.append(('bg', 0, y0, maxw, y))
+    # 글자 너비 기준으로 코드 블록 바탕을 맞추고, 인라인 코드 바탕을 붙인다
+    used = min(maxw, max(used, 1))
+    final = []
+    for o in ops:
+        if o[0] == 'bg':
+            final.append(('bg', o[1] - 3, o[2], used + 3, o[4]))
+        elif o[0] == 'hr':
+            final.append(('hr', 0, used, o[3]))
+        else:
+            if o[0] == 't' and 'c' in o[4] and o[3].strip():
+                w = fm.measure(o[3])
+                final.append(('cbg', o[1] - 2, o[2] + 1, o[1] + w + 2, o[2] + lh - 1))
+            final.append(o)
+    return final, used, max(y, lh)
+
+
+def md_draw(c, ops, ox, oy, fonts, fg, code_fg, code_bg, link_fg, dim):
+    """md_layout의 조각들을 (ox, oy)에 그린다."""
+    fb, fbb, fi, fm = fonts['body'], fonts['bodyb'], fonts['bodyi'], fonts['mono']
+    for o in ops:
+        k = o[0]
+        if k in ('bg', 'cbg'):
+            c.create_rectangle(ox + o[1], oy + o[2], ox + o[3], oy + o[4], fill=code_bg, outline='')
+        elif k == 'bar':
+            c.create_line(ox + o[1], oy + o[2], ox + o[1], oy + o[3], fill=dim, width=3)
+        elif k == 'hr':
+            c.create_line(ox + o[1], oy + o[3], ox + o[2], oy + o[3], fill=dim)
+    for o in ops:
+        if o[0] != 't':
+            continue
+        st = o[4]
+        f = fm if 'c' in st else fbb if 'b' in st else fi if 'i' in st else fb
+        col = code_fg if 'c' in st else link_fg if 'u' in st else fg
+        t = c.create_text(ox + o[1], oy + o[2], text=o[3], anchor='nw', font=f, fill=col)
+        if 'u' in st or 's' in st:
+            x0, y0, x1, y1 = c.bbox(t)
+            yy = y1 - 2 if 'u' in st else (y0 + y1) / 2
+            c.create_line(x0, yy, x1, yy, fill=col)
 
 
 def mix_any(a, b, t):
@@ -2447,7 +2627,7 @@ class ChatWin:
             last = ms[-1] if ms else None
             unread = sum(1 for m in ms if m['ts'] > self.read.get(r, self.app.chat_seen) and m['from'] != 'user')
             label = T('전체 대화') if r == '*' else names.get(r) or next((m['fromLabel'] for m in ms if m['from'] == r), r[:8])
-            info.append((r, label, one_line(last['text'], 40) if last else '', last['ts'] if last else 0,
+            info.append((r, label, md_plain(last['text'], 40) if last else '', last['ts'] if last else 0,
                          0 if r == self.room else unread))
         sig = (tuple(info), self.room)
         if sig == self.room_sig:
@@ -2543,7 +2723,7 @@ class ChatWin:
                 y = y1 + 16 * Z
                 prev_from = None
             text = m['text'] if len(m['text']) <= 1200 else m['text'][:1200] + T(' …(이하 생략)')
-            text = re.sub(r'\n\s*\n+', '\n', text).replace('**', '')
+            ops, tw, th = md_layout(text, maxw, F)
             mine = m['from'] == 'user'
             kind = T('명령') if mine else (T('답변') if m.get('reply') else KIND_TEXT.get(m['kind'], ''))
             if mine:
@@ -2551,15 +2731,12 @@ class ChatWin:
                 if head:
                     t = c.create_text(W - 16 * Z, y, text=head, anchor='ne', font=F['small'], fill=CHAT['sub'])
                     y = c.bbox(t)[3] + 3 * Z
-                t = c.create_text(0, 0, text=text, width=maxw, anchor='nw', font=F['body'], fill='#191919')
-                x0, y0, x1, y1 = c.bbox(t)
-                bw, bh = x1 - x0, y1 - y0
+                bw, bh = tw, th
                 bx1 = W - 16 * Z
                 bx0 = bx1 - bw - 2 * pad
-                c.coords(t, bx0 + pad, y + pad * 0.8)
                 round_rect(c, bx0, y, bx1, y + bh + 1.6 * pad, 9 * Z, fill=self.ME, outline='')
                 c.create_polygon(bx1 - 6 * Z, y + 6 * Z, bx1 + 7 * Z, y + 4 * Z, bx1 - 2 * Z, y + 15 * Z, fill=self.ME, outline='')
-                c.tag_raise(t)
+                md_draw(c, ops, bx0 + pad, y + pad * 0.8, F, '#191919', '#7a3e00', '#f2d400', '#0b57b0', '#8a7a00')
                 tt = c.create_text(bx0 - 6 * Z, y + bh + 1.6 * pad, text=self._clock(m['ts']), anchor='se', font=F['small'],
                                    fill=CHAT['time'])
                 if not m.get('read'):
@@ -2584,14 +2761,11 @@ class ChatWin:
                 c.create_text(hx, y + 1 * Z, anchor='nw', font=F['small'], fill=CHAT['time'],
                               text=f'→ {to_label}' + (f' · {kind}' if kind else ''))
                 y = c.bbox(t)[3] + 4 * Z
-            t = c.create_text(0, 0, text=text, width=maxw, anchor='nw', font=F['body'], fill=CHAT['text'])
-            x0, y0, x1, y1 = c.bbox(t)
-            bw, bh = x1 - x0, y1 - y0
-            c.coords(t, bx0 + pad, y + pad * 0.8)
+            bw, bh = tw, th
             round_rect(c, bx0, y, bx0 + bw + 2 * pad, y + bh + 1.6 * pad, 9 * Z, fill=self.OTHER, outline='')
             if show_head:
                 c.create_polygon(bx0 + 6 * Z, y + 6 * Z, bx0 - 7 * Z, y + 4 * Z, bx0 + 2 * Z, y + 15 * Z, fill=self.OTHER, outline='')
-            c.tag_raise(t)
+            md_draw(c, ops, bx0 + pad, y + pad * 0.8, F, CHAT['text'], CHAT['code'], CHAT['code_bg'], CHAT['link'], CHAT['time'])
             c.create_text(bx0 + bw + 2 * pad + 6 * Z, y + bh + 1.6 * pad, text=self._clock(m['ts']), anchor='sw',
                           font=F['small'], fill=CHAT['time'])
             y += bh + 1.6 * pad + gap * 2
@@ -3035,6 +3209,144 @@ def wrap_text(text, font, px):
     return out
 
 
+def photo_fit(path, width, height=None, cache=None):
+    """그림을 width×height 안에 들도록 정수배로 줄이거나(작으면 3배까지) 키운 PhotoImage. 못 읽으면 None."""
+    try:
+        key = (path, os.path.getmtime(path), width, height)
+    except OSError:
+        return None
+    if cache is not None and key in cache:
+        return cache[key]
+    try:
+        img = tk.PhotoImage(file=path)
+    except tk.TclError:
+        return None
+    # 정수배 줄임만 되므로 a/b (a=1~3) 중 칸에 들어가는 가장 큰 배율을 고른다
+    iw, ih = img.width(), img.height()
+    best = (0, 1, 1)
+    for a in (1, 2, 3):
+        if a > 1 and iw * ih * a * a > 8_000_000:  # 큰 캡처를 키우면 메모리를 많이 잡는다
+            break
+        b = max(1, -(-iw * a // width), -(-ih * a // height) if height else 1)
+        if iw * a / b > best[0] and (a == 1 or b > a):
+            best = (iw * a / b, a, b)
+    _w, a, b = best
+    if a > 1:
+        img = img.zoom(a, a)
+    img = img.subsample(b, b) if b > 1 else img
+    if cache is not None:
+        cache[key] = img
+    return img
+
+
+class ImageViewer:
+    """캡처 크게 보기: 앱 창 크기의 어두운 창에 그림을 맞춰 보여 준다.
+    ← →·[이전]/[다음]으로 같은 묶음의 다른 그림, 더블클릭·[원래 크기]로 100% 보기(끌어서 이동, 휠로 위아래),
+    Esc·[닫기]·그림 바깥 클릭으로 닫는다."""
+    BG = '#0e1116'
+
+    def __init__(self, app, paths, index=0):
+        self.app, self.paths, self.i = app, list(paths), max(0, min(index, len(paths) - 1))
+        self.full, self.cache, self.orig, self._after = False, {}, {}, None
+        F, Z, root = app.fonts, app.Z, app.root
+        w = self.win = tk.Toplevel(root)
+        w.title(T('크게 보기'))
+        w.configure(bg=self.BG)
+        w.transient(root)
+        root.update_idletasks()
+        w.geometry(f'{max(640, root.winfo_width())}x{max(480, root.winfo_height())}+{root.winfo_rootx()}+{root.winfo_rooty()}')
+        bar = tk.Frame(w, bg=self.BG, padx=int(12 * Z), pady=int(8 * Z))
+        bar.pack(fill='x')
+        bk = dict(bg='#232a33', fg='#ffffff', hover='#323b47')
+        self.prev_b = app._btn(bar, '‹ ' + T('이전'), lambda: self.go(-1), **bk)
+        self.next_b = app._btn(bar, T('다음') + ' ›', lambda: self.go(1), **bk)
+        if len(self.paths) > 1:
+            self.prev_b.pack(side='left')
+            self.next_b.pack(side='left', padx=(6, 0))
+        self.label = tk.Label(bar, text='', font=F['small'], bg=self.BG, fg='#c9d1da', anchor='w')
+        self.label.pack(side='left', padx=12, fill='x', expand=True)
+        app._btn(bar, T('닫기') + '  ✕', self.close, **bk).pack(side='right')
+        app._btn(bar, T('파일 열기'), lambda: os.startfile(self.paths[self.i]), **bk).pack(side='right', padx=6)
+        self.size_b = app._btn(bar, '', self.toggle, **bk)
+        self.size_b.pack(side='right')
+        self.c = c = tk.Canvas(w, bg=self.BG, highlightthickness=0)
+        c.pack(fill='both', expand=True)
+        for seq, fn in (('<Escape>', lambda e: self.close()), ('<Left>', lambda e: self.go(-1)), ('<Right>', lambda e: self.go(1)),
+                        ('<space>', lambda e: self.toggle())):
+            w.bind(seq, fn)
+        c.bind('<Configure>', lambda e: self.redraw_later())
+        c.bind('<Double-Button-1>', lambda e: self.toggle())
+        c.bind('<ButtonPress-1>', self.press)
+        c.bind('<B1-Motion>', lambda e: self.full and c.scan_dragto(e.x, e.y, gain=1))
+        c.bind('<MouseWheel>', lambda e: self.full and c.yview_scroll(int(-e.delta / 120) * 3, 'units'))
+        w.protocol('WM_DELETE_WINDOW', self.close)
+        w.after(30, lambda: (w.lift(), w.focus_force(), self.draw()))
+
+    def redraw_later(self):
+        if self._after:
+            self.win.after_cancel(self._after)
+        self._after = self.win.after(60, self.draw)
+
+    def draw(self):
+        self._after = None
+        if not self.win.winfo_exists():
+            return
+        c, p = self.c, self.paths[self.i]
+        W, H = max(50, c.winfo_width()), max(50, c.winfo_height())
+        c.delete('all')
+        if self.full:
+            if p not in self.orig:
+                try:
+                    self.orig[p] = tk.PhotoImage(file=p)
+                except tk.TclError:
+                    self.orig[p] = None
+            img = self.orig[p]
+        else:
+            img = photo_fit(p, W - 32, H - 32, self.cache)
+        if not img:
+            c.create_text(W / 2, H / 2, text=T('그림을 열 수 없어요'), fill='#c9d1da', font=self.app.fonts['body'])
+            self.img_box = (0, 0, 0, 0)
+        elif self.full:
+            iw, ih = img.width(), img.height()
+            x, y = max(0, (W - iw) // 2), max(0, (H - ih) // 2)
+            c.create_image(x, y, image=img, anchor='nw')
+            c.configure(scrollregion=(0, 0, max(W, iw), max(H, ih)))
+            self.img_box = (x, y, x + iw, y + ih)
+        else:
+            c.configure(scrollregion=(0, 0, W, H))
+            c.xview_moveto(0)
+            c.yview_moveto(0)
+            c.create_image(W / 2, H / 2, image=img)
+            iw, ih = img.width(), img.height()
+            self.img_box = ((W - iw) / 2, (H - ih) / 2, (W + iw) / 2, (H + ih) / 2)
+        n = len(self.paths)
+        self.label.configure(text=(f'{self.i + 1} / {n}  ·  ' if n > 1 else '') + os.path.basename(p))
+        self.size_b.configure(text=T('창에 맞추기') if self.full else T('원래 크기'))
+        c.configure(cursor='fleur' if self.full else 'arrow')
+
+    def press(self, e):
+        if self.full:
+            self.c.scan_mark(e.x, e.y)
+            return
+        x0, y0, x1, y1 = self.img_box
+        if not (x0 <= e.x <= x1 and y0 <= e.y <= y1):  # 그림 바깥을 누르면 닫는다
+            self.close()
+
+    def toggle(self):
+        self.full = not self.full
+        self.draw()
+
+    def go(self, d):
+        if len(self.paths) > 1:
+            self.i = (self.i + d) % len(self.paths)
+            self.full = False
+            self.draw()
+
+    def close(self):
+        if self.win.winfo_exists():
+            self.win.destroy()
+
+
 class MeetingWin:
     """회의실: 세션을 골라 초대하고 최근 N턴의 작업 결과를 보고받는다. 위쪽은 회의 장면(탁자에 둘러앉은 세션, 발표 스크린,
     대사 창), 아래는 '회의 준비'와 '회의록' 접는 칸. 보고서가 오면 그 세션이 손을 들고, 차례로 일어나 발표하듯 대사가
@@ -3338,7 +3650,10 @@ class MeetingWin:
             c.create_image(cx, cy, image=img, tags='scr')
             if len(imgs) > 1:
                 c.create_text(x1 - 6 * Z, y1 - 4 * Z, text=f'+{len(imgs) - 1}', anchor='se', font=F['tiny'], fill=ACCENT, tags='scr')
-            c.tag_bind('scr', '<Button-1>', lambda e, p=imgs[0]: os.startfile(p))
+            c.create_text(x0 + 6 * Z, y1 - 4 * Z, text='⤢ ' + T('크게 보기'), anchor='sw', font=F['tiny'], fill=ACCENT, tags='scr')
+            c.tag_bind('scr', '<Button-1>', lambda e, ps=list(imgs): ImageViewer(self.app, ps, 0))
+            c.tag_bind('scr', '<Enter>', lambda e: c.configure(cursor='hand2'))
+            c.tag_bind('scr', '<Leave>', lambda e: c.configure(cursor=''))
         else:
             r = next((x for x in self.roster if x['sid'] == self.speaker), None)
             if r and r['report']:
@@ -3357,30 +3672,7 @@ class MeetingWin:
             self.app.tw.run(300, lambda e: c.coords(cover, x0 + (x1 - x0) * e, y0, x1, y1), ease=ease_in_out, key='scr')
 
     def thumb(self, path, width, height=None):
-        """캡처 미리보기 (width×height 안에 들도록 정수배 줄임). 못 읽으면 None."""
-        try:
-            key = (path, os.path.getmtime(path), width, height)
-        except OSError:
-            return None
-        if key not in self.thumbs:
-            try:
-                img = tk.PhotoImage(file=path)
-            except tk.TclError:
-                return None
-            # 정수배 줄임만 되므로 a/b (a=1~3) 중 칸에 들어가는 가장 큰 배율을 고른다
-            iw, ih = img.width(), img.height()
-            best = (0, 1, 1)
-            for a in (1, 2, 3):
-                if a > 1 and iw * ih * a * a > 8_000_000:  # 큰 캡처를 키우면 메모리를 많이 잡는다
-                    break
-                b = max(1, -(-iw * a // width), -(-ih * a // height) if height else 1)
-                if iw * a / b > best[0] and (a == 1 or b > a):
-                    best = (iw * a / b, a, b)
-            _w, a, b = best
-            if a > 1:
-                img = img.zoom(a, a)
-            self.thumbs[key] = img.subsample(b, b) if b > 1 else img
-        return self.thumbs[key]
+        return photo_fit(path, width, height, self.thumbs)
 
     # ── 대사 창 ──
     def draw_dialog(self):
@@ -3745,13 +4037,14 @@ class MeetingWin:
             self.wraps.append(l)
         shots = tk.Frame(f, bg=CARD2)
         shots.pack(fill='x', pady=(6, 0))
-        for p in self.images(m, it)[:6]:
+        ps = self.images(m, it)[:6]
+        for i, p in enumerate(ps):
             img = self.thumb(p, int(260 * Z))
             if not img:
                 continue
             b = tk.Label(shots, image=img, bg=CARD2, cursor='hand2', highlightthickness=1, highlightbackground=EDGE)
             b.pack(side='left', padx=(0, 8))
-            b.bind('<Button-1>', lambda e, p=p: os.startfile(p))
+            b.bind('<Button-1>', lambda e, i=i: ImageViewer(self.app, ps, i))
 
     def _bind_wheel(self, root):
         stack = [root]
@@ -4314,6 +4607,9 @@ class App:
         for k, (size, weight) in FONT_SPECS.items():
             fam, wt = font_face(weight, self.has_pd)
             self.fonts[k] = tkfont.Font(family=fam, size=self._fs(size), weight=wt)
+        fam, wt = font_face('normal', self.has_pd)
+        self.fonts['bodyi'] = tkfont.Font(family=fam, size=self._fs(10), weight=wt, slant='italic')  # 세션톡 마크다운
+        self.fonts['mono'] = tkfont.Font(family='Consolas', size=self._fs(10))
         self.desks, self.frames, self.order = {}, {}, []
         self.cols, self.room_w, self.room_px, self.rows = 0, 0, 0, 0
         self.sel = None
@@ -5173,6 +5469,8 @@ class App:
         self.Z = ZOOMS[ni]
         for k, (size, _w) in FONT_SPECS.items():
             self.fonts[k].configure(size=self._fs(size))
+        self.fonts['bodyi'].configure(size=self._fs(10))
+        self.fonts['mono'].configure(size=self._fs(10))
         self.zoom_lbl.configure(text=f'{self.Z * 100:.0f}%')
         self.top.configure(height=int(56 * self.Z))
         self.root.after(120, lambda: self._place_tr(0) if not self.menu_open else None)
