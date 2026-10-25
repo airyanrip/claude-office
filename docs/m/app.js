@@ -64,6 +64,7 @@ const STR = {
   pinnedSec: ['고정한 세션', 'Pinned', '固定したセッション', '已置顶'], pinOn: ['대화 상대 목록 위에 고정했어요', 'Pinned to the top', '一覧の上に固定しました', '已置顶'],
   pinOff: ['고정을 풀었어요', 'Unpinned', '固定を解除しました', '已取消置顶'],
   tyWork: ['작업 중', 'Working', '作業中', '工作中'], tyWait: ['확인을 기다리는 중', 'Waiting for approval', '承認待ち', '等待确认'],
+  olderN: ['↑ 이전 대화 {0}개 더 보기', '↑ Show {0} earlier messages', '↑ 以前の会話をあと{0}件', '↑ 再显示 {0} 条早先消息'],
   members: ['대화상대', 'Members', 'メンバー', '成员'], searchName: ['이름 검색', 'Search names', '名前で検索', '搜索名称'],
   allRoom: ['전체 채팅방', 'All chats', '全体チャット', '全部聊天'], allRoomSub: ['모든 세션의 대화를 한곳에서', 'Every session in one place', 'すべてのセッションの会話をまとめて', '所有会话的对话'],
   sessionsN: ['세션 {0}', 'Sessions {0}', 'セッション {0}', '会话 {0}'], noMatch: ['찾는 세션이 없어요', 'No matching session', '該当するセッションがありません', '没有匹配的会话'],
@@ -440,7 +441,7 @@ function go(k, dir) {
   markTab();
   render(false, dir);
   window.scrollTo(0, 0);
-  if (k === 'talk') refreshChat(true);
+  if (k === 'talk') { toBottom(false); refreshChat(true, true); }  // 들어오자마자 맨 아래 (흘러내리는 스크롤 없이)
   if (k === 'more') loadPast();
 }
 window.addEventListener('resize', markTab);
@@ -976,15 +977,19 @@ function tickTyping() {
   }
 }
 setInterval(() => { if (tab === 'talk' && !document.hidden) { spinN++; tickTyping(); } }, 160);
-function setRoom(r) { room = r; localStorage.setItem('co.room', r); chatData = null; render(); refreshChat(true); }
-async function refreshChat(force) {
+function setRoom(r) { room = r; localStorage.setItem('co.room', r); chatData = null; chatLimit = 40; render(); refreshChat(true, true); }
+let chatLimit = 40;  // 처음엔 최근 40개만 (오래된 것은 위의 버튼으로)
+const nearBottom = () => window.innerHeight + window.scrollY >= document.body.scrollHeight - 160;
+function toBottom(smooth) { window.scrollTo({ top: document.body.scrollHeight, behavior: smooth ? 'smooth' : 'auto' }); }
+async function refreshChat(force, jump) {
   try {
     const d = await api('/api/chat?room=' + encodeURIComponent(room), null, { etag: true });
     const sig = JSON.stringify(d, (k, v) => (k === 'el' || k === 'tok' || k === 'tool' ? 0 : v));  // 시간·토큰만 바뀌면 다시 그리지 않고 그 줄만
     chatRecv = Date.now();
     if (sig === chatSig && !force) { if (chatData) { chatData.typing = d.typing; tickTyping(); } return; }
+    const follow = jump || nearBottom();  // 읽던 중이면 끌어내리지 않는다
     chatSig = sig; chatData = d;
-    drawChat(true);
+    drawChat(follow ? (jump ? 'jump' : 'smooth') : false);
   } catch (e) { /* 다음 폴링 때 */ }
 }
 // ── 마크다운 (Claude Code 터미널처럼): 굵게·기울임·코드·코드 블록·제목·목록·인용·링크·취소선. 글자는 textContent로만 넣는다 ──
@@ -1042,7 +1047,13 @@ function drawChat(scroll) {
   box.textContent = '';
   if (!chatData) { box.append(h('div', { class: 'empty' }, h('div', { class: 'spin' }))); return; }
   if (!chatData.msgs.length) box.append(h('div', { class: 'empty', text: t('noQa') }));
-  chatData.msgs.forEach(m => {
+  const older = Math.max(0, chatData.msgs.length - chatLimit);
+  if (older) box.append(h('button', { class: 'btn line older', text: t('olderN', older), onclick: () => {
+    const h0 = document.body.scrollHeight, y0 = window.scrollY;
+    chatLimit += 40; drawChat(false);
+    window.scrollTo(0, y0 + document.body.scrollHeight - h0);  // 보던 자리 그대로
+  } }));
+  chatData.msgs.slice(older).forEach(m => {
     const me = m.from === 'user';
     box.append(h('div', { class: 'msg ' + (me ? 'me' : 'other') },
       me ? null : h('div', { class: 'who', text: (m.fromLabel || '') + (room === '*' && m.toLabel ? ' → ' + (m.to === 'user' ? t('me') : m.toLabel) : '') }),
@@ -1054,7 +1065,7 @@ function drawChat(scroll) {
     box.append(h('div', { class: 'msg other' }, h('div', { class: 'who', text: s ? s.name : '' }),
       h('div', { class: 'b typing-b', 'data-sid': x.sid }, h('div', { class: 'ty-line', text: typingLine(x) }), h('div', { class: 'ty-tool', text: x.tool ? '⎿  ' + x.tool : '' }))));
   });
-  if (scroll) window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+  if (scroll) toBottom(scroll === 'smooth');
 }
 
 // ───────────── 비서 ─────────────

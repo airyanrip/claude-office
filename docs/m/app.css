@@ -368,3 +368,4 @@ body.meet-docs .crop { width: 260px; }
 .dr-row.pinned { background: color-mix(in srgb, #e0a100 12%, var(--bg)); box-shadow: inset 4px 0 0 #e0a100; }
 .dr-row.pinned.on { background: var(--mint); }
 .dr-pin.on { color: #e0a100; }
+.chat .older { align-self: center; min-height: 34px; padding: 4px 14px; font-size: 13px; margin-bottom: 4px; }

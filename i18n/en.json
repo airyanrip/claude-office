@@ -396,6 +396,7 @@
  "세션 {0}개 · 최근 7일": "{0} sessions · last 7 days",
  "받는 세션: {0} ▾": "To: {0} ▾",
  "아직 대화 없음": "No chats yet",
+ "↑ 이전 대화 {0}개 더 보기": "↑ Show {0} earlier messages",
  "{0} · 브리핑 중": "{0} · briefing",
  "아직 브리핑 없음": "No briefing yet",
  "보여 줄 제안이 없습니다.\n[브리핑 받기]를 누르면 비서 세션이 다른 세션들을 살펴보고 여기에 제안을 적어요.": "No suggestions to show.\nPress [Get briefing] and the Secretary session will review other sessions and write suggestions here.",

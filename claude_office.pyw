@@ -46,6 +46,7 @@ TAIL_BYTES = 4_000_000          # 시작할 때 로그용으로 읽는 대화 �
 QA_MAX = 8000                   # 대화 탭: 요청·답변 하나의 최대 글자 수
 QA_KEEP = 60                    # 대화 탭: 세션마다 기억하는 Q&A 수
 TALK_HISTORY = 20               # 세션톡: 세션마다 보여 주는 최근 대화 (터미널에서 직접 나눈 것 포함)
+TALK_PAGE = 50                  # 세션톡: 처음에 그리는 메시지 수 (위의 [이전 대화 더 보기]로 더)
 QA_SCAN = 1_500_000_000         # 대화 탭: 요청을 찾으러 거슬러 올라가는 최대 바이트
 QA_ANSWER_SCAN = 64_000_000     # 대화 탭: 요청 하나의 답변을 찾는 최대 바이트
 LIVE_CHUNK = 16 * 1024 * 1024   # 한 번 폴링에 읽는 최대 바이트
@@ -2167,7 +2168,8 @@ class PageHost(tk.Frame):
 
     def title(self, text=None):
         if text:
-            self.app.page_title.configure(text=str(text).split(' · ')[0])
+            self._title = str(text).split(' · ')[0]
+            self.app.page_title.configure(text=self._title)
 
     def bind(self, seq=None, func=None, add=None):
         # 창이면 안쪽 위젯 모두에 걸리는 단축키·휠을, 틀에서는 이 틀 안의 위젯에서 일어난 것만 받도록 넘긴다
@@ -2196,7 +2198,24 @@ class PageHost(tk.Frame):
         pass
 
     def deiconify(self):
-        pass
+        """숨겨 둔 화면(KEEP_PAGES)을 다시 보인다."""
+        app = self.app
+        if app.page is self:
+            return
+        if app.page:
+            old, app.page = app.page, None
+            app._drop_page(old)
+        app.paned.pack_forget()
+        app.page_wrap.pack(fill='both', expand=True)
+        app.page, app.page_key = self, self.key
+        self.place(x=int(56 * app.Z), y=0, relwidth=1, relheight=1)
+        app.tw.run(280, lambda e: self.place_configure(x=int(56 * app.Z * (1 - e))), ease=ease_out, key='page')
+        if getattr(self, '_title', None):
+            app.page_title.configure(text=self._title)
+        app.draw_side(force=True)
+
+
+KEEP_PAGES = ('chat',)  # 자주 오가는 화면: 닫지 않고 숨겨 두어 다시 열 때 렉이 없게
 
 
 class StorageWin:
@@ -2526,12 +2545,13 @@ class ChatWin:
         self.app = app
         self.room = '*'
         self.target = None
-        self.faces = {}
+        self.faces = app.__dict__.setdefault('chat_faces', {})
+        self.limit = TALK_PAGE
         self.read = {}          # 방 → 마지막으로 본 시각
         self.sig = None
         self.room_sig = None
         self.room_ids, self.room_rows = None, {}
-        self.md_cache = {}
+        self.md_cache = app.__dict__.setdefault('chat_md', {})  # 글 배치 캐시도 앱에 남긴다
         self.spin, self.typ_items = 0, {}
         self.dirty = True
         F, Z = app.fonts, app.Z
@@ -2600,6 +2620,7 @@ class ChatWin:
 
     def set_room(self, room):
         self.room = room
+        self.limit = TALK_PAGE
         self.read[room] = time.time()
         if room != '*':
             self.target = room
@@ -2653,10 +2674,21 @@ class ChatWin:
         self.draw(to_end=True)
 
     def face(self, sid, size=2):
-        key = (sid, size)
-        if key not in self.faces:
-            self.faces[key] = make_frames(sid, size * self.app.Z, self.app.avatars.get(sid))[0]['idle']
+        av = self.app.avatars.get(sid)
+        key = (sid, size, self.app.Z, json.dumps(av, sort_keys=True) if av else '')
+        if key not in self.faces:  # 앱에 남겨 두어 세션톡을 다시 열 때 다시 만들지 않는다
+            self.faces[key] = make_frames(sid, size * self.app.Z, av)[0]['idle']
         return self.faces[key]
+
+    def more(self):
+        """이전 대화를 더 그리고, 보던 자리(원래 맨 위 메시지)가 그대로 보이게 한다."""
+        old = self.cv.bbox('all')
+        self.limit += TALK_PAGE
+        self.dirty = True
+        self.draw()
+        new = self.cv.bbox('all')
+        if old and new and new[3] > 0:
+            self.cv.yview_moveto(max(0.0, (new[3] - old[3]) / new[3]))
 
     # ── 데이터 ──
     def collect(self):
@@ -2714,6 +2746,9 @@ class ChatWin:
     def _tick(self):
         if not self.win.winfo_exists():
             return
+        if not self.cv.winfo_ismapped():  # 숨겨 둔 동안은 쉰다
+            self.win.after(1000, self._tick)
+            return
         try:
             self.dots = (self.dots + 1) % 4
             self.draw()
@@ -2726,7 +2761,7 @@ class ChatWin:
         if not self.win.winfo_exists():
             return
         self.spin += 1
-        if getattr(self, 'typing', None):
+        if getattr(self, 'typing', None) and self.cv.winfo_ismapped():
             self._refresh_typing()
         self.win.after(160, self._spin_tick)
 
@@ -2763,7 +2798,9 @@ class ChatWin:
         room = self.room
         if room != '*' and room not in names and not any(self.in_room(m, room) for m in msgs):
             room = self.room = '*'
-        shown = [m for m in msgs if self.in_room(m, room)][-200:]
+        mine = [m for m in msgs if self.in_room(m, room)]
+        shown = mine[-self.limit:]
+        self.hidden = len(mine) - len(shown)
         if room == '*':
             self.title.configure(text=T('전체 대화'))
             self.sub.configure(text=T('세션 {0}개 · 최근 7일').format(len(live)))
@@ -2911,6 +2948,15 @@ class ChatWin:
         y = 16 * Z
         day = None
         prev_from = None
+        if getattr(self, 'hidden', 0):  # 오래된 대화는 눌러야 그린다 (열 때 가볍게)
+            t = c.create_text(W / 2, y + 10 * Z, text=T('↑ 이전 대화 {0}개 더 보기').format(self.hidden), font=F['bodyb'], fill=ACC_TEXT,
+                              tags='more')
+            x0, y0, x1, y1 = c.bbox(t)
+            c.tag_lower(round_rect(c, x0 - 14 * Z, y0 - 6 * Z, x1 + 14 * Z, y1 + 6 * Z, 12 * Z, fill=CHAT['other'], outline='', tags='more'), t)
+            c.tag_bind('more', '<Button-1>', lambda e: self.more())
+            c.tag_bind('more', '<Enter>', lambda e: c.configure(cursor='hand2'))
+            c.tag_bind('more', '<Leave>', lambda e: c.configure(cursor=''))
+            y = y1 + 18 * Z
         if not msgs:
             c.create_text(W / 2, 80 * Z, text=T('아직 주고받은 메시지가 없어요.\n세션끼리 협업 메시지를 보내면 여기에 대화로 쌓입니다.'),
                           justify='center', font=F['body'], fill=CHAT['empty'])
@@ -5578,7 +5624,7 @@ class App:
             return tk.Toplevel(self.root)
         if self.page:  # 한 번에 한 화면
             old, self.page = self.page, None
-            old.destroy()
+            self._drop_page(old)
         self.paned.pack_forget()
         self.page_wrap.pack(fill='both', expand=True)
         self.page = PageHost(self, key)
@@ -5589,8 +5635,15 @@ class App:
     def show_office(self):
         if self.page:
             old, self.page = self.page, None
-            old.destroy()
+            self._drop_page(old)
         self._office_back()
+
+    def _drop_page(self, old):
+        """화면을 닫는다. 자주 오가는 화면(KEEP_PAGES)은 지우지 않고 숨겨 두었다가 다시 열 때 그대로 보인다."""
+        if old.key in KEEP_PAGES and old.winfo_exists():
+            old.place_forget()
+            return
+        old.destroy()
 
     def _office_back(self):
         self.page_wrap.pack_forget()
@@ -7334,9 +7387,13 @@ class App:
         self.update_panel()
 
     def open_chat(self, sid=None):
+        reuse = bool(self.chatwin and self.chatwin.win.winfo_exists())
         w = self._open_win('chatwin', lambda: ChatWin(self))
         if sid:
             w.set_room(sid)
+        elif reuse:  # 숨겨 두었던 세션톡: 바뀐 것만 반영하고 맨 아래로
+            w.draw(to_end=True)
+            w.cv.yview_moveto(1.0)
         self.chat_seen = time.time()
         self.draw_side()
 
