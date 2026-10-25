@@ -3819,6 +3819,15 @@ class RemoteWin:
         self.url.pack(fill='x', pady=(6, 0))
         self.wraps.append(self.url)
         self.dl = tk.Frame(c, bg=CARD)  # cloudflared가 없을 때
+        # 미리보기
+        c = self._card(T('휴대폰 화면 미리보기'))
+        l = tk.Label(c, text=T('휴대폰 웹앱을 이 PC에서 휴대폰 크기 창으로 띄워 봐요. 바깥 연결 없이 이 PC 안에서만 열리고, 실제 세션이 그대로 보이며 버튼도 실제로 동작해요.'),
+                     font=F['body'], bg=CARD, fg=TEXT2, anchor='w', justify='left')
+        l.pack(fill='x')
+        self.wraps.append(l)
+        b = app._btn(c, T('휴대폰 화면 열기'), app.remote_preview, bg=CARD, fg=ACC_TEXT, hover=HOVER)
+        b.configure(highlightbackground=ACCENT)
+        b.pack(anchor='w', pady=(10, 0))
         # 휴대폰 연결
         c = self._card(T('휴대폰 연결'))
         self.pair_note = tk.Label(c, text='', font=F['body'], bg=CARD, fg=TEXT2, anchor='w', justify='left')
@@ -3856,7 +3865,7 @@ class RemoteWin:
 
     def toggle(self):
         app = self.app
-        if app.remote and app.remote.httpd:
+        if app.remote and app.remote.tunnel:
             if self.pairing:
                 self.hide_qr(revoke=True)
             app.remote_stop()
@@ -3870,13 +3879,14 @@ class RemoteWin:
         app, F, Z = self.app, self.app.fonts, self.app.Z
         r = app.remote
         st = r.status if r else 'off'
-        on = bool(r and r.httpd)
-        col = {'on': ACCENT, 'starting': '#f0a020', 'no_cloudflared': RED}.get(st, '#8a96a3')
+        on = bool(r and r.tunnel)
+        col = {'on': ACCENT, 'local': BLUE, 'starting': '#f0a020', 'no_cloudflared': RED}.get(st, '#8a96a3')
         self.dot.delete('all')
         s = int(self.dot['width'])
         self.dot.create_oval(2, 2, s - 2, s - 2, fill=col, outline='')
         self.status.configure(text={'on': T('켜짐 · 휴대폰에서 접속할 수 있어요'), 'starting': T('연결하는 중…'),
-                                    'no_cloudflared': T('cloudflared가 없어요')}.get(st, T('꺼짐')))
+                                    'no_cloudflared': T('cloudflared가 없어요'),
+                                    'local': T('PC 안에서만 켜짐 (미리보기) · 휴대폰에서 쓰려면 [원격 켜기]')}.get(st, T('꺼짐')))
         self.toggle_btn.configure(text=T('원격 끄기') if on else T('원격 켜기'))
         self.toggle_btn._bg = CARD2 if on else ACCENT
         self.toggle_btn.configure(bg=self.toggle_btn._bg, fg=FG if on else '#ffffff')
@@ -3958,7 +3968,7 @@ class RemoteWin:
 
     def draw_devices(self, force=False):
         r = self.app.remote
-        devs = [d for d in (r.cfg['devices'] if r else []) if d.get('seen')]
+        devs = [d for d in (r.cfg['devices'] if r else []) if d.get('seen') and not d.get('preview')]
         now = time.time()
         sig = tuple((d['id'], d['name'], int((now - d['seen']) // 60), bool(d.get('push'))) for d in devs)
         if sig == self.dev_sig and not force:
@@ -6265,8 +6275,31 @@ class App:
             return False
         self.cfg['remote_on'] = True
         self.save_cfg()
-        self._remote_pump()
+        self._ensure_pump()
         return True
+
+    def _ensure_pump(self):
+        if not getattr(self, '_pumping', False):
+            self._remote_pump()
+
+    def remote_preview(self):
+        """휴대폰 웹앱을 이 PC에서 휴대폰 크기 창으로 띄운다 (터널 없이 PC 안에서만, 실제 세션이 그대로 보임)."""
+        r = self.remote_obj()
+        r.start(tunnel=False)
+        self._ensure_pump()
+        link = r.preview_link()
+        exe = next((x for x in (
+            os.path.join(os.environ.get('ProgramFiles', ''), 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            os.path.join(os.environ.get('ProgramFiles(x86)', ''), 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            os.path.join(LOCAL, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            os.path.join(os.environ.get('ProgramFiles(x86)', ''), 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+            os.path.join(os.environ.get('ProgramFiles', ''), 'Microsoft', 'Edge', 'Application', 'msedge.exe')) if os.path.isfile(x)), None)
+        if exe:  # 따로 쓰는 프로필로 앱 창 (평소 브라우저와 섞이지 않게)
+            subprocess.Popen([exe, f'--app={link}', '--window-size=420,880', '--no-first-run', '--no-default-browser-check',
+                              '--user-data-dir=' + os.path.join(CACHE_DIR, 'preview-browser')])
+        else:
+            webbrowser.open(link)
+        self.toast(T('휴대폰 화면 미리보기를 열었어요 · 이 PC 안에서만 연결돼요'))
 
     def remote_stop(self):
         if self.remote:

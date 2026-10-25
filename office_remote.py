@@ -471,25 +471,49 @@ class Remote:
         self.log = (self.log + [time.strftime('%H:%M:%S ') + text])[-30:]
 
     # ── 켜고 끄기 ──
-    def start(self):
-        if self.httpd:
+    def start(self, tunnel=True):
+        """서버를 켠다. tunnel=False면 이 PC 안에서만 (화면 미리보기용) — 바깥 연결·주소 알림 없음."""
+        if self.tunnel or (self.httpd and not tunnel):
             return True
-        exe = find_cloudflared(self.co.CACHE_DIR)
-        if not exe:
+        exe = find_cloudflared(self.co.CACHE_DIR) if tunnel else None
+        if tunnel and not exe:
             self.status = 'no_cloudflared'
             return False
-        handler = type('H', (_Handler,), {'remote': self})
-        self.httpd = _Server(('127.0.0.1', 0), handler)
-        self.port = self.httpd.server_address[1]
-        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        if not self.httpd:
+            handler = type('H', (_Handler,), {'remote': self})
+            self.httpd = _Server(('127.0.0.1', 0), handler)
+            self.port = self.httpd.server_address[1]
+            threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+            self.note(f'API 127.0.0.1:{self.port}')
+        if not tunnel:
+            self.status = 'local'
+            return True
         self.status = 'starting'
-        self.note(f'API 127.0.0.1:{self.port}')
         self.tunnel = Tunnel(exe, self.port, self._on_url, self.note)
         threading.Thread(target=self._announce_loop, daemon=True).start()
         return True
 
+    @property
+    def local_url(self):
+        return f'http://127.0.0.1:{self.port}' if self.httpd else None
+
+    def preview_link(self):
+        """PC에서 휴대폰 화면을 띄워 볼 주소. 미리보기 기기는 하나만 두고 열 때마다 열쇠를 새로 만든다."""
+        with self.lock:
+            self.cfg['devices'] = [d for d in self.cfg['devices'] if not d.get('preview')]
+        dev_id, link = self.pair('PC preview')
+        tok = urllib.parse.parse_qs(link.split('#', 1)[1])['k'][0]
+        with self.lock:
+            for d in self.cfg['devices']:
+                if d['id'] == dev_id:
+                    d['preview'] = True
+        self.save()
+        frag = urllib.parse.urlencode({'k': tok, 't': self.cfg['topic'], 'u': self.local_url})
+        return f'{self.local_url}/m/#{frag}'
+
     def stop(self, wait=0):
-        """끈다. 휴대폰이 '꺼짐'을 알 수 있게 빈 주소를 알린다 (wait초까지 기다림 — 프로그램을 닫을 때)."""
+        """끈다. 터널을 열었었다면 휴대폰이 '꺼짐'을 알 수 있게 빈 주소를 알린다 (wait초까지 기다림 — 프로그램을 닫을 때)."""
+        had_tunnel = bool(self.tunnel)
         if self.tunnel:
             self.tunnel.stop()
             self.tunnel = None
@@ -500,6 +524,8 @@ class Remote:
         self.url = None
         self.status = 'off'
         self.note('stopped')
+        if not had_tunnel:
+            return
         t = threading.Thread(target=self._publish, args=(None,), daemon=True)
         t.start()
         if wait:
@@ -686,6 +712,32 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    STATIC_TYPES = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+                    '.png': 'image/png', '.webmanifest': 'application/manifest+json'}
+
+    def _static(self, path):
+        """휴대폰 웹앱 파일(docs/m)을 그대로 내준다 — PC 안 미리보기, 또는 GitHub Pages 없이 터널 주소로 열 때. 비밀은 없다."""
+        if path in ('/', '/m'):
+            self.send_response(302)
+            self.send_header('Location', '/m/')
+            self.end_headers()
+            return
+        name = path[3:] or 'index.html'
+        root = os.path.join(self.remote.co.APP_DIR, 'docs', 'm')
+        ext = os.path.splitext(name)[1].lower()
+        p = os.path.join(root, name)
+        if not re.fullmatch(r'[\w.-]+', name) or ext not in self.STATIC_TYPES or not os.path.isfile(p):
+            return self._send(404, {'error': 'not found'})
+        with open(p, 'rb') as f:
+            data = f.read()
+        self.send_response(200)
+        self.send_header('Content-Type', self.STATIC_TYPES[ext])
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_OPTIONS(self):
         self.send_response(204)
         self._cors()
@@ -701,6 +753,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlsplit(self.path)
         if u.path == '/api/ping':
             return self._send(200, {'ok': True, 'app': 'claude-office'})
+        if method == 'GET' and (u.path in ('/', '/m') or u.path.startswith('/m/')):
+            return self._static(u.path)
         ip = self.headers.get('CF-Connecting-IP') or self.client_address[0]
         dev = self.remote.auth(self.headers.get('Authorization', ''), ip)
         if not dev:
