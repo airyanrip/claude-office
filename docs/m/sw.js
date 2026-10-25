@@ -1,6 +1,6 @@
 /* 서비스 워커: 앱 껍데기를 저장해 두고(오프라인에서도 열림), PC가 보낸 '새 알림 있음' 푸시를 받으면
  * PC에 알림 내용을 물어 보여 준다. 연결 정보는 앱이 IndexedDB에 넣어 둔 것을 쓴다. */
-const SHELL = 'co-shell-v13';
+const SHELL = 'co-shell-v14';
 const FILES = ['./', 'index.html', 'app.css', 'app.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {

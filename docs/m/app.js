@@ -72,6 +72,9 @@ const STR = {
   members: ['대화상대', 'Members', 'メンバー', '成员'], searchName: ['이름 검색', 'Search names', '名前で検索', '搜索名称'],
   allRoom: ['전체 채팅방', 'All chats', '全体チャット', '全部聊天'], allRoomSub: ['모든 세션의 대화를 한곳에서', 'Every session in one place', 'すべてのセッションの会話をまとめて', '所有会话的对话'],
   sessionsN: ['세션 {0}', 'Sessions {0}', 'セッション {0}', '会话 {0}'], noMatch: ['찾는 세션이 없어요', 'No matching session', '該当するセッションがありません', '没有匹配的会话'],
+  attach: ['사진 붙이기', 'Attach photo', '写真を添付', '添加图片'], imgOnly: ['이 사진을 봐 주세요', 'Please look at this photo', 'この写真を見てください', '请看这张图片'],
+  imgMax: ['사진은 한 번에 {0}장까지예요', 'Up to {0} photos at a time', '写真は一度に{0}枚までです', '每次最多 {0} 张图片'],
+  imgBad: ['사진을 읽지 못했어요', "Couldn't read the photo", '写真を読み込めませんでした', '无法读取图片'],
   talkPh: ['메시지 보내기', 'Message', 'メッセージ', '发送消息'], pickRoom: ['위에서 세션을 고르면 명령을 보낼 수 있어요', 'Pick a session above to send a command', '上でセッションを選ぶと指示を送れます', '在上方选择会话即可发送指令'],
   brief: ['브리핑 받기', 'Get briefing', 'ブリーフィング', '获取简报'], briefing: ['브리핑 중…', 'Briefing…', 'ブリーフィング中…', '简报中…'],
   noSec: ['비서 세션이 없어요 · PC에서 만들어 주세요', 'No secretary session · create one on the PC', '秘書セッションがありません · PCで作成してください', '没有秘书会话 · 请在电脑上创建'],
@@ -579,8 +582,8 @@ function openSession(sid) {
   openSheet(sh => {
     sh.append(h('div', { class: 'sheet-top' }, h('div', { class: 'grip' }), h('div', { id: 'sess-head' }),
       segBar(['qa', 'log', 'tasks'], sheetTab, k => { sheetTab = k; fillSession(); })), h('div', { id: 'sess-body' }),
-      composer(t('cmdPh'), async text => {
-        await api('/api/send', { sid, text });
+      composer(t('cmdPh'), async (text, images) => {
+        await api('/api/send', { sid, text, images }, { timeout: images ? 90000 : 25000 });
         toast(t('sent'));
         setTimeout(loadSession, 1500);
       }));
@@ -598,18 +601,64 @@ function moveKnob(seg) {
   const b = seg.querySelector('button.on'), k = seg.querySelector('.knob');
   if (b && k) { k.style.left = b.offsetLeft + 'px'; k.style.width = b.offsetWidth + 'px'; }
 }
+// 사진 붙이기: 휴대폰에서 줄여(긴 변 1600px JPEG) 보내고, PC 말풍선용 작은 PNG도 함께 만든다
+const IMG_MAX = 4;
+function loadImg(file) {
+  return new Promise((ok, bad) => {
+    const u = URL.createObjectURL(file), im = new Image();
+    im.onload = () => { URL.revokeObjectURL(u); ok(im); };
+    im.onerror = () => { URL.revokeObjectURL(u); bad(new Error('image')); };
+    im.src = u;
+  });
+}
+function shrink(im, max, type, q) {
+  const k = Math.min(1, max / Math.max(im.naturalWidth, im.naturalHeight));
+  const c = h('canvas');
+  c.width = Math.max(1, Math.round(im.naturalWidth * k)); c.height = Math.max(1, Math.round(im.naturalHeight * k));
+  const g = c.getContext('2d');
+  if (type === 'image/jpeg') { g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); }  // 투명한 곳이 검게 되지 않게
+  g.drawImage(im, 0, 0, c.width, c.height);
+  return c.toDataURL(type, q);
+}
+async function prepImage(file) {
+  const im = await loadImg(file);
+  return { data: shrink(im, 1600, 'image/jpeg', 0.85), preview: shrink(im, 480, 'image/png') };
+}
 function composer(ph, onSend) {
   const ta = h('textarea', { rows: 1, placeholder: ph, enterkeyhint: 'send' });
   ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = Math.min(140, ta.scrollHeight) + 'px'; });
   const btn = h('button', { class: 'btn pri', text: t('send') });
+  const imgs = [];  // [{data, preview}]
+  const strip = h('div', { class: 'att-strip' });
+  const drawStrip = () => {
+    strip.textContent = '';
+    imgs.forEach((im, i) => strip.append(h('div', { class: 'att' }, h('img', { src: im.preview, alt: '' }),
+      h('button', { class: 'att-x', 'aria-label': 'remove', text: '×', onclick: () => { imgs.splice(i, 1); drawStrip(); } }))));
+    strip.hidden = !imgs.length;
+  };
+  const pick = h('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true });
+  pick.addEventListener('change', async () => {
+    const files = [...pick.files];
+    pick.value = '';
+    for (const f of files) {
+      if (imgs.length >= IMG_MAX) { toast(t('imgMax', IMG_MAX), true); break; }
+      try { imgs.push(await prepImage(f)); } catch (e) { toast(t('imgBad'), true); }
+    }
+    drawStrip();
+  });
+  const clip = h('button', { class: 'btn line att-btn', 'aria-label': t('attach'), title: t('attach'), text: '📎', onclick: () => pick.click() });
   btn.onclick = async () => {
-    const text = ta.value.trim();
+    const text = ta.value.trim() || (imgs.length ? t('imgOnly') : '');
     if (!text) return;
     btn.disabled = true;
-    try { await onSend(text); ta.value = ''; ta.style.height = ''; buzz(12); } catch (e) { toast(t('err', e.message === 'session is off' ? t('offSession') : e.message), true); }
+    try {
+      await onSend(text, imgs.length ? imgs.slice() : undefined);
+      ta.value = ''; ta.style.height = ''; imgs.length = 0; drawStrip(); buzz(12);
+    } catch (e) { toast(t('err', e.message === 'session is off' ? t('offSession') : e.message), true); }
     btn.disabled = false;
   };
-  return h('div', { class: 'composer' }, ta, btn);
+  drawStrip();
+  return h('div', { class: 'composer' }, strip, clip, pick, ta, btn);
 }
 function refreshSheet() {
   const s = state && state.sessions.find(x => x.sid === sheetFor);
@@ -689,7 +738,10 @@ function viewTalk(v) {
   if (cur) {
     if (!talkComposer || talkComposerRoom !== room) {  // 다시 그려도 쓰던 글이 지워지지 않게 같은 입력칸을 쓴다
       talkComposerRoom = room;
-      talkComposer = composer(t('talkPh'), async text => { await api('/api/send', { sid: talkComposerRoom, text }); toast(t('sent')); refreshChat(true); });
+      talkComposer = composer(t('talkPh'), async (text, images) => {
+        await api('/api/send', { sid: talkComposerRoom, text, images }, { timeout: images ? 90000 : 25000 });
+        toast(t('sent')); refreshChat(true, true);
+      });
       talkComposer.classList.add('fixed');
     }
     if (talkComposer.parentNode !== document.body) document.body.append(talkComposer);

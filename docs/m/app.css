@@ -382,3 +382,12 @@ body.meet-docs .crop { width: 260px; }
 .ask-free { margin-top: 4px; }
 .ask-sent { color: var(--acc-text); font-weight: 700; font-size: 13px; }
 .md-img img { display: block; max-width: 100%; max-height: 260px; border-radius: 10px; margin: 4px 0; cursor: zoom-in; border: 1px solid var(--edge); }
+/* 명령에 사진 붙이기 */
+.composer { flex-wrap: wrap; }
+.composer textarea { flex: 1 1 0; min-width: 0; }
+.att-strip { flex: 1 0 100%; display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; }
+.att-strip[hidden] { display: none; }
+.att { position: relative; flex: none; width: 64px; height: 64px; border-radius: 10px; overflow: hidden; border: 1px solid var(--edge); background: var(--card2); }
+.att img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.att-x { position: absolute; top: 2px; right: 2px; width: 22px; height: 22px; border-radius: 50%; border: 0; background: rgba(0,0,0,.6); color: #fff; font-size: 15px; line-height: 20px; padding: 0; }
+.att-btn { flex: none; min-width: 42px; padding: 0 10px; font-size: 18px; }

@@ -910,13 +910,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self._handle('POST')
 
-    def _body(self):
+    def _body(self, limit=64_000):
         """POST 본문(JSON 객체). 크기가 이상하거나 JSON이 아니면 None."""
         try:
             n = int(self.headers.get('Content-Length') or 0)
         except ValueError:
             return None
-        if n < 0 or n > 64_000:
+        if n < 0 or n > limit:
             return None
         try:
             body = json.loads(self.rfile.read(n) or b'{}')
@@ -972,7 +972,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._send(401, {'error': 'unauthorized'})
         body = {}
         if method == 'POST':
-            body = self._body()
+            body = self._body(UPLOAD_BODY if u.path == '/api/send' else 64_000)  # 사진을 올리는 명령만 크게 받는다 (인증 뒤)
             if body is None:
                 return self._send(400, {'error': 'bad json'})
         fn = API.get((method, u.path))
@@ -1137,14 +1137,21 @@ def api_chat(r, dev, q, body):
 
 
 def api_send(r, dev, q, body):
+    """명령 보내기. images가 있으면 사진을 PC에 저장하고 사진 경로와 함께 보낸다 (세션이 Read로 열어 본다)."""
     sid, text = str(body.get('sid') or ''), str(body.get('text') or '').strip()
-    if not text or len(text) > 8000:
+    images = body.get('images') or []
+    if (not text and not images) or len(text) > 8000:
         raise ValueError('text')
 
     def run():
         if sid not in r.app.mon.sessions:
             raise ValueError('session is off')
-        r.app.mon.send_user(sid, text, r.co.talk_text(sid, text)[len(text):])
+        extra = r.co.talk_text(sid, text)[len(text):]
+        shown = text
+        if images:
+            shown, note = r.co.upload_text(text, r.co.save_upload(sid, images))
+            extra = note + extra
+        r.app.mon.send_user(sid, shown, extra)
         return {'ok': True}
 
     return r.ui(run)
@@ -1354,6 +1361,8 @@ def api_alerts(r, dev, q, body):
     since = int(q.get('since') or 0)
     return {'alerts': [a for a in r.alerts if a['ts'] > since][-10:]}
 
+
+UPLOAD_BODY = 36 * 1024 * 1024  # 사진 4장(base64) + 미리보기
 
 API = {
     ('GET', '/api/state'): api_state, ('GET', '/api/session'): api_session, ('GET', '/api/chat'): api_chat,

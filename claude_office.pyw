@@ -10,6 +10,7 @@
 가볍게 돌도록: 표준 라이브러리만 사용, 대화 기록은 새로 붙은 바이트만 읽고,
 토큰 총계는 한 번 훑은 뒤 %LOCALAPPDATA%\\ClaudeOffice\\tokens.json 에 저장해 다음부터는 이어서 읽는다.
 """
+import base64
 import collections
 import ctypes
 import datetime
@@ -728,10 +729,64 @@ def talk_text(sid, text):
     return text + '\n\n' + IMG_HINT.format(folder, CAPTURE_PS1)
 
 
+UPLOAD_NOTE = T('[세션톡 첨부 사진] 사용자가 휴대폰에서 사진 {0}장을 함께 보냈습니다. 위에 적힌 경로의 사진을 Read 도구로 열어 보고 요청에 답하세요.')
+UPLOAD_MAX = 4                  # 한 번에 올리는 사진 수
+UPLOAD_BYTES = 6 * 1024 * 1024  # 사진 한 장 크기 한도 (휴대폰이 줄여서 보내므로 보통 1MB 안쪽)
+
+
 def strip_hint(text):
-    """대화에 보일 때는 사진 안내를 뺀다."""
-    i = text.find(IMG_HINT.split('{0}')[0][:16])
-    return text[:i].rstrip() if i > 0 else text
+    """대화에 보일 때는 사진 안내(세션에만 가는 덧붙임)를 뺀다."""
+    cut = [i for i in (text.find(IMG_HINT.split('{0}')[0][:16]), text.find(UPLOAD_NOTE.split('{0}')[0][:12])) if i > 0]
+    return text[:min(cut)].rstrip() if cut else text
+
+
+def save_upload(sid, images):
+    """휴대폰에서 올린 사진들을 세션톡 사진 폴더에 저장한다. images: [{'data': JPEG·PNG base64, 'preview': PNG base64(선택)}].
+    PC 말풍선은 PNG만 그릴 수 있어 JPEG 옆에 작은 PNG(-p.png)를 둔다. 저장한 원본 경로 목록."""
+    if not re.fullmatch(r'[0-9a-f-]{8,40}', sid) or not isinstance(images, list) or len(images) > UPLOAD_MAX:
+        raise ValueError('images')
+    sigs = {'.jpg': b'\xff\xd8\xff', '.png': b'\x89PNG\r\n\x1a\n'}
+
+    def dec(s):
+        try:
+            raw = base64.b64decode(str(s).split(',', 1)[-1], validate=True)
+        except (ValueError, TypeError):
+            raise ValueError('image')
+        if len(raw) > UPLOAD_BYTES:
+            raise ValueError('image too big')
+        ext = next((e for e, sig in sigs.items() if raw.startswith(sig)), None)
+        if not ext:
+            raise ValueError('image type')
+        return raw, ext
+
+    files = []
+    for im in images:
+        if not isinstance(im, dict):
+            raise ValueError('image')
+        raw, ext = dec(im.get('data'))
+        pv = dec(im['preview']) if im.get('preview') else None
+        if pv and pv[1] != '.png':
+            raise ValueError('preview')
+        files.append((raw, ext, pv and pv[0]))
+    folder = os.path.join(TALK_IMG_DIR, sid[:8])
+    os.makedirs(folder, exist_ok=True)
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    out = []
+    for i, (raw, ext, pv) in enumerate(files, 1):
+        base = os.path.join(folder, f'up-{stamp}-{os.urandom(2).hex()}-{i}')
+        with open(base + ext, 'wb') as f:
+            f.write(raw)
+        if pv and ext != '.png':
+            with open(base + '-p.png', 'wb') as f:
+                f.write(pv)
+        out.append(base + ext)
+    return out
+
+
+def upload_text(text, paths):
+    """(말풍선 글, 세션에만 가는 덧붙임): 말풍선엔 사진을 ![사진 n](경로)로 보이고, 세션엔 사진을 열어 보라고 덧붙인다."""
+    lines = '\n'.join(f'![{T("사진")} {i}]({p})' for i, p in enumerate(paths, 1))
+    return (text + '\n\n' + lines).strip(), '\n\n' + UPLOAD_NOTE.format(len(paths))
 
 
 def clean_talk_images(limit=TALK_IMG_MAX):
@@ -1866,6 +1921,9 @@ def md_plain(text, n=None):
     for kind, prefix, runs in md_blocks(text):
         if kind in ('gap', 'hr'):
             continue
+        if kind == 'img':  # 경로 대신 [사진]
+            out.append('[' + T('사진') + ']')
+            continue
         out.append((prefix.strip() + ' ' if prefix else '') + ''.join(t for t, _st in runs))
     return one_line(' '.join(out), n)
 
@@ -2350,10 +2408,17 @@ class StorageWin:
         tk.Label(head, text=T('저장 공간'), font=F['brand'], bg=TOPBG, fg=ACCENT).pack(side='left')
         self.total = tk.Label(head, text='', font=F['statb'], bg=TOPBG, fg=FG)
         self.total.pack(side='left', padx=16)
-        app._btn(head, T('다시 계산'), self.scan).pack(side='right')
-        tk.Label(w, text=T('보기와 폴더 열기만 합니다 (아무것도 지우지 않음). 크기는 백그라운드에서 셉니다.'),
+        self.rescan = app._btn(head, T('다시 계산'), self.scan)
+        self.rescan.pack(side='right')
+        self.tabs = {}
+        for k, label in (('files', T('PC 파일')), ('claude', T('Claude 폴더'))):
+            b = app._btn(head, label, lambda k=k: self.show(k))
+            b.pack(side='right', padx=(0, 6))
+            self.tabs[k] = b
+        self.claude_box = box = tk.Frame(w, bg=BG)
+        tk.Label(box, text=T('보기와 폴더 열기만 합니다 (아무것도 지우지 않음). 크기는 백그라운드에서 셉니다.'),
                  font=F['small'], bg=BG, fg=DIM, anchor='w', padx=14).pack(fill='x', pady=(6, 0))
-        body = tk.Frame(w, bg=BG)
+        body = tk.Frame(box, bg=BG)
         body.pack(fill='both', expand=True, padx=(14, 0), pady=8)
         self.cv = cv = tk.Canvas(body, bg=BG, highlightthickness=0)
         sb = tk.Scrollbar(body, command=cv.yview)
@@ -2364,12 +2429,37 @@ class StorageWin:
         self.inner_id = cv.create_window(0, 0, window=self.inner, anchor='nw')
         self.inner.bind('<Configure>', lambda e: cv.configure(scrollregion=cv.bbox('all')))
         cv.bind('<Configure>', lambda e: cv.itemconfig(self.inner_id, width=e.width - 12))
-        w.bind('<MouseWheel>', lambda e: cv.yview_scroll(int(-e.delta / 120), 'units'))
+        self.files = FileBrowser(app, w)
+        w.bind('<MouseWheel>', lambda e: (self.files.cv if self.tab == 'files' else cv).yview_scroll(int(-e.delta / 120), 'units'))
         self.stop = threading.Event()
         self.results = collections.deque()
         self.rows = {}
+        self.tab = None
         self.build()
-        self.scan()
+        self.show(app.cfg.get('storage_tab') or 'claude')
+
+    def show(self, k):
+        """위쪽 탭: Claude 폴더(용량) / PC 파일(탐색기)."""
+        if k == self.tab:
+            return
+        self.tab = k
+        self.app.cfg['storage_tab'] = k
+        for key, b in self.tabs.items():
+            on = key == k
+            b._bg = ACCENT if on else CARD2
+            b.configure(bg=b._bg, fg='#ffffff' if on else FG)
+        self.claude_box.pack_forget()
+        self.files.frame.pack_forget()
+        if k == 'files':
+            self.rescan.pack_forget()
+            self.total.configure(text='')
+            self.files.frame.pack(fill='both', expand=True)
+            self.files.start()
+        else:
+            self.rescan.pack(side='right', before=self.tabs['files'])
+            self.claude_box.pack(fill='both', expand=True)
+            if not any(r['val'] is not None for r in self.rows.values()):
+                self.scan()
 
     def build(self):
         F, app = self.app.fonts, self.app
@@ -2483,6 +2573,212 @@ class StorageWin:
         self.stop.set()
         self.app.storage = None
         self.win.destroy()
+
+
+FILES_MAX = 3000  # PC 파일: 한 폴더에서 보여 주는 항목 수 (그보다 많으면 검색으로 좁힌다)
+
+
+def drives():
+    """이 PC의 드라이브 (C:\\, D:\\ …)."""
+    if os.name != 'nt':
+        return ['/']
+    import ctypes
+    mask = ctypes.windll.kernel32.GetLogicalDrives()
+    return [f'{chr(65 + i)}:\\' for i in range(26) if mask >> i & 1]
+
+
+def list_dir(path):
+    """폴더 안 (이름, 전체 경로, 폴더인지, 크기, 고친 시각). 폴더 먼저, 이름순. 못 읽는 항목은 건너뛴다."""
+    out = []
+    with os.scandir(path) as it:
+        for e in it:
+            try:
+                d = e.is_dir()
+                st = e.stat(follow_symlinks=False)
+                out.append((e.name, e.path, d, 0 if d else st.st_size, st.st_mtime))
+            except OSError:
+                out.append((e.name, e.path, False, 0, 0))
+    out.sort(key=lambda x: (not x[2], x[0].lower()))
+    return out
+
+
+class FileBrowser:
+    """저장 공간의 [PC 파일] 탭: 파일 탐색기처럼 폴더를 오가며 경로를 확인하고 복사한다. 보기·열기만 하고 아무것도 바꾸지 않는다."""
+
+    def __init__(self, app, parent):
+        self.app = app
+        F = app.fonts
+        Z = app.Z
+        self.frame = fr = tk.Frame(parent, bg=BG)
+        self.path, self.items, self.sel, self.hist = None, [], None, []
+        self.results = collections.deque()
+        # 바로 가기: 드라이브·자주 쓰는 폴더
+        quick = tk.Frame(fr, bg=BG, padx=14)
+        quick.pack(fill='x', pady=(8, 0))
+        spots = [(d, d) for d in drives()]
+        spots += [(T('홈'), HOME), (T('바탕 화면'), os.path.join(HOME, 'Desktop')), (T('다운로드'), os.path.join(HOME, 'Downloads')),
+                  (T('문서'), os.path.join(HOME, 'Documents')), ('.claude', CLAUDE)]
+        for label, p in spots:
+            if os.path.isdir(p):
+                app._btn(quick, label, lambda p=p: self.go(p), font='small').pack(side='left', padx=(0, 4))
+        # 주소 줄
+        bar = tk.Frame(fr, bg=BG, padx=14)
+        bar.pack(fill='x', pady=(6, 0))
+        app._btn(bar, '←', self.back).pack(side='left')
+        app._btn(bar, '↑', self.up).pack(side='left', padx=(4, 6))
+        self.addr = tk.Entry(bar, font=F['body'], bg=CARD2, fg=FG, relief='flat', highlightthickness=1,
+                             highlightbackground=EDGE, highlightcolor=ACCENT, insertbackground=FG)
+        self.addr.pack(side='left', fill='x', expand=True, ipady=3)
+        self.addr.bind('<Return>', lambda e: self.go(self.addr.get().strip().strip('"')))
+        app._btn(bar, T('탐색기에서 열기'), lambda: open_folder(self.sel or self.path or HOME, select=bool(self.sel))).pack(side='right', padx=(6, 0))
+        app._btn(bar, T('경로 복사'), self.copy, bg=ACCENT, fg='#ffffff', hover=ACC_DARK).pack(side='right', padx=(6, 0))
+        # 검색·상태
+        row = tk.Frame(fr, bg=BG, padx=14)
+        row.pack(fill='x', pady=(6, 0))
+        self.status = tk.Label(row, text='', font=F['small'], bg=BG, fg=DIM, anchor='w')
+        self.status.pack(side='left', fill='x', expand=True)
+        self.q = tk.StringVar()
+        self.q.trace_add('write', lambda *a: self.draw())
+        tk.Entry(row, textvariable=self.q, font=F['body'], bg=CARD, fg=FG, relief='flat', width=22, highlightthickness=1,
+                 highlightbackground=EDGE, highlightcolor=ACCENT, insertbackground=FG).pack(side='right', ipady=2)
+        tk.Label(row, text=T('이 폴더에서 찾기'), font=F['small'], bg=BG, fg=DIM).pack(side='right', padx=6)
+        # 목록
+        body = tk.Frame(fr, bg=BG)
+        body.pack(fill='both', expand=True, padx=(14, 0), pady=(6, 0))
+        self.cv = cv = tk.Canvas(body, bg=CARD, highlightthickness=0)
+        sb = tk.Scrollbar(body, command=cv.yview)
+        cv.configure(yscrollcommand=sb.set)
+        sb.pack(side='right', fill='y')
+        cv.pack(side='left', fill='both', expand=True)
+        cv.bind('<Configure>', lambda e: self.draw())
+        # 고른 항목의 전체 경로
+        foot = tk.Frame(fr, bg=TOPBG, padx=14, pady=6)
+        foot.pack(fill='x', side='bottom')
+        self.full = tk.Entry(foot, font=F['small'], bg=TOPBG, fg=FG, relief='flat', readonlybackground=TOPBG, highlightthickness=0)
+        self.full.pack(fill='x')
+        self.full.configure(state='readonly')
+        self.row_h = int(26 * Z)
+
+    def start(self):
+        if self.path is None:
+            self.go(self.app.cfg.get('files_path') or HOME, push=False)
+
+    def go(self, path, push=True):
+        path = os.path.expandvars(os.path.expanduser(path or ''))
+        if os.path.isfile(path):  # 파일 경로를 넣으면 그 폴더로 가서 그 파일을 고른다
+            self.go(os.path.dirname(path), push)
+            self.pick(os.path.abspath(path))
+            return
+        if not os.path.isdir(path):
+            self.app.toast(T('폴더를 찾을 수 없어요 · {0}').format(path), warn=True)
+            return
+        path = os.path.abspath(path)
+        if push and self.path and self.path != path:
+            self.hist.append(self.path)
+        self.path, self.sel, self.items = path, None, None
+        self.app.cfg['files_path'] = path
+        self.addr.delete(0, 'end')
+        self.addr.insert(0, path)
+        self.q.set('')
+        self._show_full(path)
+        self.status.configure(text=T('읽는 중…'))
+        self.draw()
+        threading.Thread(target=self._read, args=(path,), daemon=True).start()  # 네트워크 드라이브가 느려도 화면이 멈추지 않게
+        self.app.root.after(60, self._drain)
+
+    def _read(self, path):
+        try:
+            self.results.append((path, list_dir(path), None))
+        except OSError as ex:
+            self.results.append((path, [], ex.strerror or str(ex)))
+
+    def _drain(self):
+        if not self.frame.winfo_exists():
+            return
+        while self.results:
+            path, items, err = self.results.popleft()
+            if path != self.path:
+                continue
+            self.items, self.err = items, err
+            self.cv.yview_moveto(0)
+            self.draw()
+            return
+        self.app.root.after(60, self._drain)
+
+    def back(self):
+        if self.hist:
+            self.go(self.hist.pop(), push=False)
+
+    def up(self):
+        if self.path:
+            parent = os.path.dirname(self.path.rstrip('\\/')) or self.path
+            if parent != self.path and os.path.isdir(parent):
+                self.go(parent)
+
+    def shown(self):
+        q = self.q.get().strip().lower()
+        items = self.items or []
+        return [x for x in items if q in x[0].lower()] if q else items
+
+    def draw(self):
+        c, F, Z = self.cv, self.app.fonts, self.app.Z
+        c.delete('all')
+        W = max(200, c.winfo_width())
+        if self.items is None:
+            return
+        items = self.shown()
+        n_dir = sum(1 for x in items if x[2])
+        txt = T('폴더 {0}개 · 파일 {1}개').format(n_dir, len(items) - n_dir)
+        if getattr(self, 'err', None):
+            txt = T('열 수 없는 폴더예요 · {0}').format(self.err)
+        if len(items) > FILES_MAX:
+            txt += '  ' + T('(처음 {0}개만 보여요 · 찾기로 좁혀 주세요)').format(FILES_MAX)
+        self.status.configure(text=txt)
+        rh = self.row_h
+        size_x, date_x = W - int(250 * Z), W - int(150 * Z)
+        for i, (name, path, d, size, mt) in enumerate(items[:FILES_MAX]):
+            y = i * rh
+            on = path == self.sel
+            tag = f'r{i}'
+            c.create_rectangle(0, y, W, y + rh, fill=HOVER if on else (CARD if i % 2 == 0 else CARD2), outline='', tags=(tag, 'bg'))
+            bgc = HOVER if on else (CARD if i % 2 == 0 else CARD2)
+            if d:
+                draw_icon(c, 'folder', int(20 * Z), y + rh / 2, 7 * Z, ACC_TEXT, bgc, tags=tag)
+            else:  # 문서: 모서리 접힌 종이
+                x0, y0, x1, y1 = int(15 * Z), y + rh / 2 - 7 * Z, int(25 * Z), y + rh / 2 + 7 * Z
+                c.create_polygon(x0, y0, x1 - 3 * Z, y0, x1, y0 + 3 * Z, x1, y1, x0, y1, fill='', outline=DIM, width=max(1, Z), tags=tag)
+            label = name if F['body'].measure(name) < size_x - int(50 * Z) else name[:40] + '…' + name[-14:]
+            c.create_text(int(36 * Z), y + rh / 2, text=label, anchor='w', font=F['bodyb' if d else 'body'], fill=FG, tags=tag)
+            if not d:
+                c.create_text(date_x - int(14 * Z), y + rh / 2, text=fmt_bytes(size), anchor='e', font=F['small'], fill=DIM, tags=tag)
+            if mt:
+                c.create_text(date_x, y + rh / 2, text=time.strftime('%Y-%m-%d %H:%M', time.localtime(mt)), anchor='w',
+                              font=F['small'], fill=DIM, tags=tag)
+            c.tag_bind(tag, '<Button-1>', lambda e, p=path: self.pick(p))
+            c.tag_bind(tag, '<Double-Button-1>', lambda e, p=path, d=d: self.go(p) if d else open_folder(p, select=True))
+            c.tag_bind(tag, '<Button-3>', lambda e, p=path: (self.pick(p), self.copy()))
+        if not items:
+            c.create_text(W / 2, int(40 * Z), text=T('비어 있어요') if not self.q.get() else T('찾는 이름이 없어요'), font=F['body'], fill=DIM)
+        c.configure(scrollregion=(0, 0, W, max(len(items[:FILES_MAX]) * rh, 1)))
+
+    def pick(self, path):
+        self.sel = path
+        self._show_full(path)
+        self.draw()
+
+    def _show_full(self, path):
+        self.full.configure(state='normal')
+        self.full.delete(0, 'end')
+        self.full.insert(0, path)
+        self.full.configure(state='readonly')
+
+    def copy(self):
+        p = self.sel or self.path
+        if not p:
+            return
+        self.frame.clipboard_clear()
+        self.frame.clipboard_append(p)
+        self.app.toast(T('경로를 복사했어요 · {0}').format(p))
 
 
 def scroll_frame(parent, bg):
@@ -3175,6 +3471,8 @@ class ChatWin:
 
     def _talk_img(self, path):
         """세션톡 말풍선에 넣을 사진 (폭 360·높이 240 안으로). PNG·GIF가 아니거나 없으면 None."""
+        if path.lower().endswith(('.jpg', '.jpeg')):  # 휴대폰에서 올린 사진: 옆에 둔 작은 PNG로 그린다 (Tk는 JPEG를 못 읽음)
+            path = os.path.splitext(path)[0] + '-p.png'
         if not path.lower().endswith(('.png', '.gif')) or not os.path.isfile(path):
             return None
         Z = self.app.Z

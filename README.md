@@ -42,6 +42,8 @@ captures, get next-step suggestions from a **secretary**, and control it all fro
 - Ask for screenshots ("send me a capture of the result") and the session saves them where SessionTalk can show
   them: **images appear in the chat** (click to enlarge). Images older than about 10 turns are folded into a
   "🖼 click to view" line to save memory; the image folder is trimmed only if it grows past 300 MB.
+- On the phone, tap **📎** next to the message box to attach up to 4 photos to a request. The phone shrinks them,
+  the PC saves them, and the session opens them with the Read tool before answering.
 - **Pin** important sessions to the top of the list (gold bar). Opens instantly: the latest 50 messages first,
   *↑ show earlier messages* for more.
 
@@ -120,7 +122,7 @@ Claude Code sessions started **after** the mod is installed pick it up. Settings
   **Start meeting**. Reports are presented as they arrive; *Watch* replays one. *Enlarge documents* for a big view,
   *Save as document* for an HTML file. *End meeting* when done.
 - **☰ Menu** – everything in one place: SessionTalk, suggestions, briefing, meeting room, remote control, launch
-  session, avatar, new tab, storage (folder sizes), text size, always on top, animation, dialogue speed,
+  session, avatar, new tab, storage (folder sizes + a *PC files* browser to find and copy any path), text size, always on top, animation, dialogue speed,
   **Session mod** (install / update), open as window, dark theme, language.
 
 ### Phone remote control
@@ -222,6 +224,7 @@ meeting state and documents (`session-collab/meeting/`), and deletes only empty 
 - Claude가 고르라고 물으면(**AskUserQuestion**) 질문이 버튼 카드로 떠요. 고르면(여럿 고르기·직접 입력도) 터미널에서 답한 것과 똑같이 이어서 진행해요.
 - "캡처 화면도 보내줘"처럼 사진을 부탁하면 세션이 세션톡이 보여 줄 수 있는 곳에 저장해 **대화에 사진이 떠요**(누르면 크게).
   약 10턴보다 오래된 사진은 "🖼 눌러서 보기"로 접어 메모리를 아끼고, 사진 폴더는 300MB를 넘을 때만 오래된 것부터 지워요.
+- 휴대폰에서는 입력칸 옆 **📎**로 사진을 4장까지 붙여 요청할 수 있어요. 휴대폰이 줄여 보내고 PC가 저장하면, 세션이 Read 도구로 사진을 열어 보고 답해요.
 - 중요한 세션은 **핀**으로 목록 위에 고정(금색 표시). 열 때 렉이 없게 최근 50개만 먼저 그리고 *↑ 이전 대화 더 보기*로 더 봐요.
 
 **비서**
@@ -277,7 +280,7 @@ mod를 설치한 **뒤에** 켜는 Claude Code 세션부터 적용돼요. 설정
 - **비서** – **[브리핑 받기]**를 누르고, 제안이 오면 선택지 버튼으로 일을 맡겨요. *확인한 것도 보기*로 맡긴 일의 결과를 봐요.
 - **회의실** – *회의 준비*에서 세션·범위(최근 N턴)·보고 방식을 고르고 **[회의 시작]**. 보고서가 오는 대로 발표하고, *발표 보기*로 다시 들어요.
   크게 보려면 *문서 크게 보기*, 파일로는 *자료로 저장*. 끝나면 *회의 끝내기*.
-- **☰ 메뉴** – 세션톡, 비서 제안, 브리핑, 회의실, 원격 조종, 세션 켜기, 아바타, 새 탭, 저장 공간(폴더 용량), 글자 크기, 항상 위,
+- **☰ 메뉴** – 세션톡, 비서 제안, 브리핑, 회의실, 원격 조종, 세션 켜기, 아바타, 새 탭, 저장 공간(폴더 용량 + 경로를 찾아 복사하는 *PC 파일* 탐색기), 글자 크기, 항상 위,
   움직임, 대사 속도, **세션 연결 mod**(설치·업데이트), 창으로 열기, 다크 테마, 언어를 한곳에서.
 
 ### 휴대폰 원격 조종
