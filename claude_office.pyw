@@ -205,6 +205,14 @@ def read_json(path):
         return None
 
 
+def write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
 # ───────────────────────────── 번역 ─────────────────────────────
 # 화면 문구는 한국어 원문을 열쇠로 i18n/<언어>.json 에서 찾는다. 설정 lang (없으면 윈도 표시 언어).
 LANGS = (('ko', '한국어'), ('en', 'English'), ('ja', '日本語'), ('zh', '中文'))
@@ -385,6 +393,8 @@ def _fold_paste(m):
 
 # 세션톡에서 보낸 명령은 진행 패널 mod가 이 머리글을 붙여 넣는다 (기록에는 플러그인이 보낸 프롬프트로 남는다)
 _OFFICE_HEAD = re.compile(r'^(?:The session-panel plugin sent a message:\s*)?\[사용자 명령 · 세션 사무실 [^\]\n]*\]\s*\n')
+# 플러그인이 넣은 프롬프트 끝에 Claude Code가 붙이는 안내 문단
+_HARNESS_TAIL = re.compile(r'\n\s*This is how Claude Code surfaces a prompt a plugin submits[^\n]*\s*$')
 
 
 def question_of(d):
@@ -407,7 +417,7 @@ def question_of(d):
     s = content.strip()
     m = _OFFICE_HEAD.match(s)
     if m:
-        s = s[m.end():].strip()
+        s = _HARNESS_TAIL.sub('', s[m.end():]).strip()
     elif office:
         return None  # 협업 메시지 등 mod가 넣은 다른 글
     m = re.match(r'<command-name>(.*?)</command-name>', s, re.S)
@@ -1465,6 +1475,33 @@ BRIEF_TEXT = T('비서 브리핑을 해 주세요 (secretary 스킬 순서대로
 SEC_HELLO = (T('당신은 이 PC의 비서 세션입니다. secretary 스킬(~/.claude/skills/secretary/SKILL.md)을 읽고 역할을 익히세요. '
              '사용자가 세션 사무실의 [브리핑 받기] 버튼을 누르거나 직접 요청할 때만 브리핑하고, 그 전에는 아무 작업도 하지 마세요. '
              '지금은 준비됐다고 한 줄로만 답하세요.'))
+MEET_DIR = os.path.join(COLLAB, 'meeting')                 # 회의실: 회의마다 하위 폴더에 세션별 보고서·캡처
+MEET_FILE = os.path.join(MEET_DIR, 'meeting.json')         # 지금 열린 회의 {id, startedAt, turns, members}
+CAPTURE_PS1 = os.path.join(APP_DIR, 'assets', 'capture.ps1')
+MEET_TURNS = (1, 3, 5, 10)
+REPORT_ST = {'done': (T('완료'), '#2fb985'), 'partial': (T('일부'), '#f0a020'), 'todo': (T('못 함'), RED)}
+
+
+def meet_prompt(n, reqs, folder, sid):
+    """회의실에서 세션에 보내는 업무 보고 요청. 보고서는 folder/<sid>.json, 캡처는 folder/<sid>-N.png."""
+    lines = '\n'.join(f'{i}) {one_line(q, 160)}' for i, q in enumerate(reqs, 1)) or T('(기록을 찾지 못했어요. 최근 대화에서 직접 찾아 주세요)')
+    report = os.path.join(folder, sid + '.json')
+    shot = os.path.join(folder, sid + '-1.png')
+    return T('[회의실 업무 보고] 최근 {0}턴 동안 맡았던 작업의 결과를 보고서로 정리해 주세요. 코드는 바꾸지 말고 보고만 하세요.\n'
+             '보고할 요청:\n{1}\n\n'
+             '1. 요청마다 한 일, 결과(done=완료/partial=일부/todo=못 함), 바뀐 주요 파일, 남은 일을 짧게 정리합니다.\n'
+             '2. 결과를 화면으로 보여 줄 수 있으면(UI·게임·웹·그래프·문서 등) 캡처해 PNG로 저장합니다. '
+             '창 캡처: powershell -ExecutionPolicy Bypass -File "{2}" -Out "{3}" -Title "창 제목 일부" '
+             '(-Title을 빼면 전체 화면). 만든 프로그램을 잠깐 띄워 찍고 닫아도 되고, 프로젝트의 스크린샷 방법을 써도 됩니다. '
+             '파일 이름 끝 번호를 늘려 여러 장 찍어도 됩니다. 보여 줄 화면이 없으면 생략하세요.\n'
+             '3. 마지막에 아래 JSON을 UTF-8로 {4} 에 씁니다.\n'
+             '{{"sessionId":"{5}","title":"보고 제목","summary":"두세 문장 요약",'
+             '"items":[{{"request":"요청 요약","status":"done","result":"결과","files":["경로"],"images":["{6}"]}}],'
+             '"next":"다음에 할 일","updatedAt":<현재 시각 ms>}}\n'
+             '다 쓰면 "보고서를 올렸어요" 한 줄로 답하세요.').format(n, lines, CAPTURE_PS1, shot, report, sid,
+                                                          os.path.basename(shot))
+
+
 MODE_TEXT = {'busy': T('작업 중'), 'wait': T('확인 필요'), 'idle': T('휴식'), 'sleep': T('조는 중')}
 MODE_COL = {'busy': '#2fb985', 'wait': '#f0a020', 'idle': '#5b9ee8', 'sleep': '#9a86c8'}
 LINE_COLS = ['#7fdbca', '#c792ea', '#ffcb6b', '#82aaff', '#f78c6c']
@@ -1598,6 +1635,16 @@ def draw_icon(c, kind, cx, cy, s, col, bg='#ffffff', tags=()):
         c.create_oval(cx - s * 0.85, cy - s * 0.85, cx + s * 0.85, cy + s * 0.85, **ow)
         c.create_oval(cx - s * 0.38, cy - s * 0.85, cx + s * 0.38, cy + s * 0.85, **ow)
         c.create_line(cx - s * 0.85, cy, cx + s * 0.85, cy, **kw)
+    elif kind == 'meet':  # 회의실: 둥근 탁자에 둘러앉은 세 사람
+        for dx, hy in ((-0.6, -0.5), (0.6, -0.5), (0, -0.68)):  # 머리 + 어깨 (가운데 사람이 앞)
+            c.create_arc(cx + (dx - 0.32) * s, cy + (hy + 0.2) * s, cx + (dx + 0.32) * s, cy + (hy + 0.9) * s, start=0, extent=180,
+                         fill=col, outline=bg, width=max(1, w * 0.6), tags=tags)
+            c.create_oval(cx + (dx - 0.18) * s, cy + (hy - 0.18) * s, cx + (dx + 0.18) * s, cy + (hy + 0.18) * s, fill=col,
+                          outline=bg, width=max(1, w * 0.6), tags=tags)
+        round_rect(c, cx - s * 0.95, cy + s * 0.22, cx + s * 0.95, cy + s * 0.55, s * 0.12, fill=col, tags=tags)
+        c.create_line(cx - s * 0.95, cy + s * 0.2, cx + s * 0.95, cy + s * 0.2, fill=bg, width=max(1, w * 0.6), tags=tags)
+        c.create_line(cx - s * 0.6, cy + s * 0.55, cx - s * 0.6, cy + s * 0.92, **kw)
+        c.create_line(cx + s * 0.6, cy + s * 0.55, cx + s * 0.6, cy + s * 0.92, **kw)
     elif kind == 'close':
         c.create_line(cx - s * 0.6, cy - s * 0.6, cx + s * 0.6, cy + s * 0.6, **kw)
         c.create_line(cx - s * 0.6, cy + s * 0.6, cx + s * 0.6, cy - s * 0.6, **kw)
@@ -2690,6 +2737,365 @@ class LaunchWin:
             it['btn'].unbind('<Leave>')
 
 
+class MeetingWin:
+    """회의실: 세션을 골라 초대하고 최근 N턴의 작업 결과를 보고받는다. 세션이 쓴 보고서·캡처를 카드로 모아 보여 준다."""
+
+    def __init__(self, app):
+        self.app = app
+        F, Z = app.fonts, app.Z
+        self.win = w = app.make_host('meet')
+        w.title(T('회의실 · Claude Office'))
+        w.configure(bg=BG)
+        w.geometry(f'{int(900 * Z)}x{int(780 * Z)}')
+        w.minsize(640, 480)
+        grad_head(w, app, 'meet', T('회의실'),
+                  T('세션을 초대해 최근 작업을 보고받아요. 세션이 결과를 정리하고 화면을 캡처해 보고서를 올려요.')).pack(fill='x')
+        holder = tk.Frame(w, bg=BG, padx=14)
+        holder.pack(fill='both', expand=True, pady=(10, 12))
+        self.cv, self.inner = scroll_frame(holder, BG)
+        w.bind('<MouseWheel>', lambda e: self.cv.yview_scroll(int(-e.delta / 120), 'units'))
+        self.cv.bind('<Configure>', lambda e: self._wrap(e.width), add='+')
+        self.pick = set(app.cfg.get('meet_pick') or [])
+        self.turns = app.cfg.get('meet_turns') if app.cfg.get('meet_turns') in MEET_TURNS else 3
+        self.faces, self.thumbs, self.wraps = {}, {}, []
+        self.sig = None
+        self.build()
+        self._tick()
+
+    # ── 상태 ──
+    def meeting(self):
+        m = read_json(MEET_FILE)
+        return m if isinstance(m, dict) and m.get('id') and isinstance(m.get('members'), list) else None
+
+    @staticmethod
+    def folder(m):
+        return os.path.join(MEET_DIR, str(m['id']))
+
+    def report(self, m, sid):
+        r = read_json(os.path.join(self.folder(m), sid + '.json'))
+        return r if isinstance(r, dict) and (r.get('summary') or r.get('items')) else None
+
+    def live(self):
+        app = self.app
+        with app.mon.lock:
+            return [(s.sid, app.mon.display_name(s), s.mode()) for s in app.sessions if s.sid in app.mon.sessions]
+
+    def _sig(self):
+        m = self.meeting()
+        files = ()
+        if m:
+            d = self.folder(m)
+            try:
+                files = tuple(sorted((e.name, e.stat().st_mtime) for e in os.scandir(d)))
+            except OSError:
+                pass
+        return (json.dumps(m, sort_keys=True) if m else '', files, tuple(self.live()), tuple(sorted(self.pick)), self.turns)
+
+    def _tick(self):
+        if not self.win.winfo_exists():
+            return
+        sig = self._sig()
+        if sig != self.sig:
+            self.build()
+        self.win.after(1500, self._tick)
+
+    def _wrap(self, width):
+        for l in self.wraps:
+            l.configure(wraplength=max(240, width - 80))
+
+    def face(self, sid):
+        if sid not in self.faces:
+            self.faces[sid] = make_frames(sid, 2.2 * self.app.Z, self.app.avatars.get(sid))[0]['idle']
+        return self.faces[sid]
+
+    def thumb(self, path, width):
+        """캡처 미리보기 (가로 width px 이하로 정수배 줄임). 못 읽으면 None."""
+        try:
+            key = (path, os.path.getmtime(path), width)
+        except OSError:
+            return None
+        if key not in self.thumbs:
+            try:
+                img = tk.PhotoImage(file=path)
+            except tk.TclError:
+                return None
+            k = max(1, -(-img.width() // width))
+            self.thumbs[key] = img.subsample(k, k) if k > 1 else img
+        return self.thumbs[key]
+
+    # ── 화면 ──
+    def build(self):
+        app, F, Z = self.app, self.app.fonts, self.app.Z
+        self.sig = self._sig()
+        pos = self.cv.yview()[0]
+        for c in self.inner.winfo_children():
+            c.destroy()
+        self.wraps = []
+        m = self.meeting()
+        self._setup(m)
+        if m:
+            self._reports(m)
+        for wd in self._all(self.inner):
+            wd.bind('<MouseWheel>', lambda e: self.cv.yview_scroll(int(-e.delta / 120), 'units'), add='+')
+        self._wrap(self.cv.winfo_width())
+        self.inner.update_idletasks()
+        self.cv.configure(scrollregion=self.cv.bbox('all'))
+        self.cv.yview_moveto(pos)
+
+    def _all(self, w):
+        out = [w]
+        for c in w.winfo_children():
+            out += self._all(c)
+        return out
+
+    def _chip(self, parent, text, on, cmd, img=None):
+        b = tk.Label(parent, text=text, image=img or '', compound='left', anchor='w' if img else 'center',
+                     font=self.app.fonts['bodyb' if on else 'body'],
+                     bg=MINT if on else CARD, fg=ACC_TEXT if on else FG, padx=10, pady=4, cursor='hand2',
+                     highlightthickness=2 if on else 1, highlightbackground=ACCENT if on else EDGE)
+        b.bind('<Button-1>', lambda e: cmd())
+        return b
+
+    def _setup(self, m):
+        app, F = self.app, self.app.fonts
+        card = tk.Frame(self.inner, bg=CARD, padx=16, pady=14, highlightthickness=1, highlightbackground=EDGE)
+        card.pack(fill='x', pady=(0, 12))
+        top = tk.Frame(card, bg=CARD)
+        top.pack(fill='x')
+        tk.Label(top, text=T('초대할 세션'), font=F['h2'], bg=CARD, fg=FG).pack(side='left')
+        live = self.live()
+        self.pick &= {sid for sid, _n, _m in live}
+        tk.Label(top, text=T('{0}명 선택').format(len(self.pick)), font=F['small'], bg=CARD, fg=DIM).pack(side='left', padx=10)
+        if live:
+            allon = len(self.pick) == len(live)
+            app._btn(top, T('모두 빼기') if allon else T('모두 초대'),
+                     lambda: self._set_pick(set() if allon else {s for s, _n, _m in live})).pack(side='right')
+        grid = tk.Frame(card, bg=CARD)
+        grid.pack(fill='x', pady=(10, 0))
+        if not live:
+            tk.Label(grid, text=T('켜져 있는 세션이 없어요. 세션 켜기에서 먼저 켜 주세요.'), font=F['body'], bg=CARD,
+                     fg=DIM).pack(anchor='w')
+        cols = max(1, (self.cv.winfo_width() - 60) // int(210 * app.Z)) if self.cv.winfo_width() > 1 else 3
+        for i, (sid, name, mode) in enumerate(live):
+            on = sid in self.pick
+            label = fit(name, F['bodyb'], int(130 * app.Z)) + ('' if mode != 'busy' else T(' · 작업 중'))
+            b = self._chip(grid, label, on, lambda s=sid: self._toggle(s), self.face(sid))
+            b.grid(row=i // cols, column=i % cols, sticky='we', padx=(0, 8), pady=(0, 8))
+        for c in range(cols):
+            grid.columnconfigure(c, weight=1, uniform='m')
+        row = tk.Frame(card, bg=CARD)
+        row.pack(fill='x', pady=(6, 0))
+        tk.Label(row, text=T('보고 범위'), font=F['h2'], bg=CARD, fg=FG).pack(side='left', padx=(0, 12))
+        for n in MEET_TURNS:
+            self._chip(row, T('최근 1턴') if n == 1 else T('최근 {0}턴').format(n), n == self.turns, lambda n=n: self._set_turns(n)).pack(side='left', padx=(0, 6))
+        go = app._btn(row, T('회의 시작'), self.start, bg=ACCENT, fg='#ffffff', hover=ACC_DARK, font='menu')
+        go.pack(side='right')
+        if m:
+            app._btn(row, T('회의 끝내기'), self.end).pack(side='right', padx=(0, 8))
+        l = tk.Label(card, text=T('회의를 시작하면 고른 세션마다 최근 N턴의 요청 목록과 보고 지시가 가요. 바쁜 세션은 하던 일을 마친 뒤 보고해요.'),
+                     font=F['small'], bg=CARD, fg=DIM, anchor='w', justify='left')
+        l.pack(fill='x', pady=(10, 0))
+        self.wraps.append(l)
+
+    def _reports(self, m):
+        app, F, Z = self.app, self.app.fonts, self.app.Z
+        top = tk.Frame(self.inner, bg=BG)
+        top.pack(fill='x', pady=(4, 8))
+        when = datetime.datetime.fromtimestamp(m.get('startedAt', 0) / 1000).strftime(T('%m월 %d일 %H:%M'))
+        got = sum(1 for sid in m['members'] if self.report(m, sid))
+        tk.Label(top, text=T('보고서'), font=F['h2'], bg=BG, fg=FG).pack(side='left')
+        tk.Label(top, text=T('{0} 시작 · 최근 {1}턴 · {2}/{3} 도착').format(when, m.get('turns', '?'), got, len(m['members'])),
+                 font=F['small'], bg=BG, fg=DIM).pack(side='left', padx=10)
+        app._btn(top, T('자료로 저장'), lambda: self.export(m)).pack(side='right')
+        app._btn(top, T('폴더 열기'), lambda: os.startfile(self.folder(m)) if os.path.isdir(self.folder(m)) else None
+                 ).pack(side='right', padx=(0, 6))
+        with app.mon.lock:
+            alive = {sid: (app.mon.display_name(s), s.mode()) for sid, s in app.mon.sessions.items()}
+        names = m.get('names') or {}
+        for sid in m['members']:
+            r = self.report(m, sid)
+            name, mode = alive.get(sid, (names.get(sid) or sid[:8], None))
+            if r:
+                st, col = T('보고 완료'), '#2fb985'
+            elif mode is None:
+                st, col = T('꺼져 있음'), '#8a96a3'
+            elif mode == 'busy':
+                st, col = T('보고 준비 중'), '#5b9ee8'
+            else:
+                st, col = T('요청 보냄'), '#f0a020'
+            card = tk.Frame(self.inner, bg=CARD, padx=16, pady=14, highlightthickness=1, highlightbackground=EDGE)
+            card.pack(fill='x', pady=(0, 10))
+            hd = tk.Frame(card, bg=CARD)
+            hd.pack(fill='x')
+            tk.Label(hd, image=self.face(sid), bg=MINT, padx=4, pady=4).pack(side='left', padx=(0, 12))
+            tx = tk.Frame(hd, bg=CARD)
+            tx.pack(side='left', fill='x', expand=True)
+            t1 = tk.Frame(tx, bg=CARD)
+            t1.pack(fill='x')
+            tk.Label(t1, text=clean(name, 40), font=F['h2'], bg=CARD, fg=FG).pack(side='left')
+            tk.Label(t1, text=st, font=F['tiny'], bg=col, fg='#ffffff', padx=8, pady=1).pack(side='left', padx=10)
+            if r and r.get('title'):
+                tk.Label(tx, text=one_line(r['title'], 90), font=F['bodyb'], bg=CARD, fg=ACC_TEXT, anchor='w').pack(fill='x', pady=(2, 0))
+            if not r:
+                tk.Label(tx, text=T('보고서를 기다리는 중이에요.') if mode else T('세션이 꺼져서 보고를 받을 수 없어요.'),
+                         font=F['small'], bg=CARD, fg=DIM, anchor='w').pack(fill='x', pady=(2, 0))
+                continue
+            if r.get('summary'):
+                l = tk.Label(card, text=clean(r['summary'], 1200), font=F['body'], bg=CARD2, fg=FG, anchor='w',
+                             justify='left', padx=12, pady=8)
+                l.pack(fill='x', pady=(10, 0))
+                self.wraps.append(l)
+            for it in (r.get('items') if isinstance(r.get('items'), list) else [])[:20]:
+                if isinstance(it, dict):
+                    self._item(card, m, it)
+            if r.get('next'):
+                l = tk.Label(card, text=T('다음 할 일 · ') + clean(r['next'], 600), font=F['small'], bg=CARD, fg=TEXT2,
+                             anchor='w', justify='left')
+                l.pack(fill='x', pady=(10, 0))
+                self.wraps.append(l)
+
+    def _item(self, card, m, it):
+        F, Z = self.app.fonts, self.app.Z
+        f = tk.Frame(card, bg=CARD)
+        f.pack(fill='x', pady=(12, 0))
+        tk.Frame(f, bg=EDGE, height=1).pack(fill='x', pady=(0, 10))
+        top = tk.Frame(f, bg=CARD)
+        top.pack(fill='x')
+        st, col = REPORT_ST.get(it.get('status'), REPORT_ST['done'])
+        tk.Label(top, text=st, font=F['tiny'], bg=col, fg='#ffffff', padx=8, pady=1).pack(side='left')
+        l = tk.Label(top, text=one_line(it.get('request') or '', 160), font=F['bodyb'], bg=CARD, fg=FG, anchor='w', justify='left')
+        l.pack(side='left', fill='x', expand=True, padx=10)
+        self.wraps.append(l)
+        if it.get('result'):
+            l = tk.Label(f, text=clean(it['result'], 1500), font=F['body'], bg=CARD, fg=TEXT2, anchor='w', justify='left')
+            l.pack(fill='x', pady=(6, 0))
+            self.wraps.append(l)
+        files = [str(x) for x in it.get('files') or [] if x][:8]
+        if files:
+            l = tk.Label(f, text=T('파일 · ') + ', '.join(files), font=F['small'], bg=CARD, fg=DIM, anchor='w', justify='left')
+            l.pack(fill='x', pady=(4, 0))
+            self.wraps.append(l)
+        shots = tk.Frame(f, bg=CARD)
+        shots.pack(fill='x', pady=(6, 0))
+        for p in self.images(m, it)[:6]:
+            img = self.thumb(p, int(260 * Z))
+            if not img:
+                continue
+            b = tk.Label(shots, image=img, bg=CARD, cursor='hand2', highlightthickness=1, highlightbackground=EDGE)
+            b.pack(side='left', padx=(0, 8))
+            b.bind('<Button-1>', lambda e, p=p: os.startfile(p))
+
+    def images(self, m, it):
+        out = []
+        for p in it.get('images') or []:
+            p = str(p)
+            p = p if os.path.isabs(p) else os.path.join(self.folder(m), p)
+            if p.lower().endswith(('.png', '.gif')) and os.path.isfile(p):
+                out.append(p)
+        return out
+
+    # ── 조작 ──
+    def _toggle(self, sid):
+        self._set_pick(self.pick ^ {sid})
+
+    def _set_pick(self, pick):
+        self.pick = pick
+        self.app.cfg['meet_pick'] = sorted(pick)
+        self.build()
+
+    def _set_turns(self, n):
+        self.turns = self.app.cfg['meet_turns'] = n
+        self.build()
+
+    def start(self):
+        app = self.app
+        if not self.pick:
+            app.toast(T('초대할 세션을 먼저 골라 주세요'), warn=True)
+            return
+        old = self.meeting()
+        if old and not tkmsg.askyesno(T('회의실'), T('지금 회의를 끝내고 새 회의를 시작할까요?\n(지난 보고서는 폴더에 남아요)'), parent=self.win):
+            return
+        mid = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+        m = {'id': mid, 'startedAt': int(time.time() * 1000), 'turns': self.turns, 'members': [], 'names': {}}
+        os.makedirs(self.folder(m), exist_ok=True)
+        head = meet_prompt(1, [], '', '').split(']', 1)[0] + ']'  # 지난 회의 요청은 보고할 턴에서 뺀다
+        with app.mon.lock:
+            todo = [(sid, app.mon.display_name(app.mon.sessions[sid]),
+                     [e[1] for e in app.mon.sessions[sid].qa if not e[1].startswith(head)][-self.turns:])
+                    for sid in self.pick if sid in app.mon.sessions]
+        sent = 0
+        for sid, name, reqs in todo:
+            try:
+                app.mon.send_user(sid, meet_prompt(self.turns, reqs, self.folder(m), sid))
+            except OSError as ex:
+                app.toast(T('보내기 실패: {0}').format(ex), warn=True)
+                continue
+            m['members'].append(sid)
+            m['names'][sid] = name
+            sent += 1
+        write_json(MEET_FILE, m)
+        app.save_cfg()
+        app.toast(T('{0}개 세션에 업무 보고를 요청했어요').format(sent))
+        self.build()
+
+    def end(self):
+        try:
+            os.remove(MEET_FILE)
+        except OSError:
+            pass
+        self.build()
+
+    def export(self, m):
+        """보고서를 캡처와 함께 HTML 한 장으로 만들어 브라우저로 연다."""
+        import html as H
+        e = H.escape
+        when = datetime.datetime.fromtimestamp(m.get('startedAt', 0) / 1000).strftime('%Y-%m-%d %H:%M')
+        names = m.get('names') or {}
+        out = [f'<!doctype html><meta charset="utf-8"><title>{e(T("회의 보고서"))} {e(when)}</title>',
+               '<style>body{font-family:"Pretendard","Malgun Gothic",sans-serif;background:#f4f7f6;color:#1e2329;margin:0;padding:32px}'
+               'h1{margin:0 0 4px}.sub{color:#6b7580;margin-bottom:24px}.card{background:#fff;border:1px solid #e2e8ee;'
+               'border-radius:14px;padding:20px 24px;margin-bottom:18px}h2{margin:0 0 6px}.ttl{color:#22a273;font-weight:700}'
+               '.sum{background:#f1f5f4;border-radius:10px;padding:10px 14px;margin:12px 0}.it{border-top:1px solid #e2e8ee;'
+               'padding-top:12px;margin-top:12px}.st{display:inline-block;color:#fff;border-radius:6px;padding:1px 8px;font-size:12px;'
+               'margin-right:8px}.files{color:#6b7580;font-size:13px}img{max-width:420px;border:1px solid #e2e8ee;'
+               'border-radius:8px;margin:8px 8px 0 0}</style>',
+               f'<h1>{e(T("회의 보고서"))}</h1><div class="sub">{e(when)} · {e(T("최근 {0}턴").format(m.get("turns")))}</div>']
+        for sid in m['members']:
+            r = self.report(m, sid) or {}
+            out.append(f'<div class="card"><h2>{e(self.app.mon.names.get(sid) or names.get(sid) or sid[:8])}</h2>')
+            if not r:
+                out.append(f'<p class="files">{e(T("보고서가 아직 없어요."))}</p></div>')
+                continue
+            if r.get('title'):
+                out.append(f'<div class="ttl">{e(str(r["title"]))}</div>')
+            if r.get('summary'):
+                out.append(f'<div class="sum">{e(str(r["summary"]))}</div>')
+            for it in r.get('items') if isinstance(r.get('items'), list) else []:
+                if not isinstance(it, dict):
+                    continue
+                st, col = REPORT_ST.get(it.get('status'), REPORT_ST['done'])
+                out.append(f'<div class="it"><span class="st" style="background:{col}">{e(st)}</span>'
+                           f'<b>{e(str(it.get("request") or ""))}</b><p>{e(str(it.get("result") or ""))}</p>')
+                if it.get('files'):
+                    out.append(f'<div class="files">{e(", ".join(map(str, it["files"])))}</div>')
+                for p in self.images(m, it):
+                    out.append(f'<a href="file:///{e(p)}"><img src="file:///{e(p)}"></a>')
+                out.append('</div>')
+            if r.get('next'):
+                out.append(f'<p class="files">{e(T("다음 할 일 · "))}{e(str(r["next"]))}</p>')
+            out.append('</div>')
+        path = os.path.join(self.folder(m), 'report.html')
+        try:
+            os.makedirs(self.folder(m), exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(out))
+        except OSError as ex:
+            self.app.toast(T('저장 실패: {0}').format(ex), warn=True)
+            return
+        webbrowser.open('file:///' + path.replace('\\', '/'))
+        self.app.toast(T('회의 자료를 저장했어요 · {0}').format(path))
+
+
 class OnboardWin:
     """처음 쓰는 환경: 비서 세션을 만들지 묻는다."""
 
@@ -2810,7 +3216,7 @@ class App:
         self.grid_y = WALL_H + 4
         self.tab_sig = None
         self.tab_drop = None
-        self.chatwin = self.secwin = self.avwin = self.launchwin = None
+        self.chatwin = self.secwin = self.avwin = self.launchwin = self.meetwin = None
         self.chat_seen = self.cfg.get('chat_seen') or time.time()
         self.pending = {}           # 이 창에서 켠 세션 id → (켠 시각, 이름) — 출근하면 골라 준다
         self.menu_open, self.menu_hover, self.menu_boxes, self.menu_off = False, None, [], 0
@@ -2942,10 +3348,6 @@ class App:
         b._bg = bg
         return b
 
-    def _check(self, parent, text, var, cmd=None):
-        return tk.Checkbutton(parent, text=text, variable=var, command=cmd, font=self.fonts['stat'], bg=TOPBG, fg=DIM,
-                              selectcolor=CARD, activebackground=TOPBG, activeforeground=FG, bd=0, cursor='hand2')
-
     def toast(self, text, warn=False):
         """창 아래쪽에 잠깐 뜨는 알림."""
         if self.toast_w:
@@ -2957,7 +3359,9 @@ class App:
         self.root.after(3800, lambda: l.destroy() if l.winfo_exists() else None)
 
     def _on_escape(self, e):
-        if self.menu_open:
+        if self.close_lang():
+            pass
+        elif self.menu_open:
             self.toggle_menu(False)
         elif self.page:
             self.show_office()
@@ -3037,14 +3441,89 @@ class App:
         self.quit()
 
     def pick_lang(self, e=None):
-        m = tk.Menu(self.root, tearoff=0, font=self.fonts['body'])
-        for code, name in LANGS:
-            m.add_command(label=('✔ ' if code == LANG else '    ') + name, command=lambda c=code: self.set_lang(c))
-        x, y = (e.x_root, e.y_root) if e else (self.root.winfo_pointerx(), self.root.winfo_pointery())
-        try:
-            m.tk_popup(x, y)
-        finally:
-            m.grab_release()
+        """언어 고르기 카드. 메뉴의 '언어' 칸 바로 아래(메뉴가 닫혀 있으면 화면 가운데)에 띄운다."""
+        self.close_lang()
+        Z, F = self.Z, self.fonts
+        W, RH, HD = int(260 * Z), int(46 * Z), int(64 * Z)
+        H = HD + RH * len(LANGS) + int(12 * Z)
+        c = self.lang_card = tk.Canvas(self.root, width=W, height=H, bg=SURF, highlightthickness=1,
+                                       highlightbackground=EDGE, bd=0, cursor='hand2')
+        draw_icon(c, 'globe', 30 * Z, 30 * Z, 11 * Z, ACCENT, SURF)
+        c.create_text(50 * Z, 22 * Z, text=T('언어'), font=F['h2'], fill=FG, anchor='w')
+        c.create_text(50 * Z, 42 * Z, text=T('고르면 창이 다시 열려요'), font=F['small'], fill=DIM, anchor='w')
+        c.create_line(16 * Z, HD - 6 * Z, W - 16 * Z, HD - 6 * Z, fill=EDGE)
+        self._lang_rows = []
+        for i, (code, name) in enumerate(LANGS):
+            y0 = HD + i * RH
+            self._lang_rows.append((y0, y0 + RH, code))
+        self._lang_hover = None
+        self._draw_lang_rows()
+        c.bind('<Motion>', lambda ev: self._lang_motion(ev.y))
+        c.bind('<Leave>', lambda ev: self._lang_motion(-1))
+        c.bind('<Button-1>', self._lang_click)
+        box = next((b for b in getattr(self, 'menu_boxes', []) if b[5] == 'globe'), None)
+        rw, rh = self.root.winfo_width(), self.root.winfo_height()
+        if self.menu_open and box:
+            x = self.gm.winfo_rootx() - self.root.winfo_rootx() + box[0]
+            y = self.gm.winfo_rooty() - self.root.winfo_rooty() + box[3] + 8 * Z
+        else:
+            x, y = (rw - W) / 2, (rh - H) / 2
+        c.place(x=max(8, min(x, rw - W - 8)), y=max(8, min(y, rh - H - 8)))
+        c.tk.call('raise', c._w)
+        self._lang_armed = False  # 카드를 연 그 클릭은 '밖 클릭'으로 치지 않는다
+        self.root.after_idle(lambda: setattr(self, '_lang_armed', True))
+        if not getattr(self, '_lang_bound', False):  # 카드 밖을 누르면 닫는다
+            self._lang_bound = True
+            self.root.bind_all('<Button-1>', self._lang_outside, add='+')
+
+    def _draw_lang_rows(self):
+        c, Z, F = self.lang_card, self.Z, self.fonts
+        c.delete('row')
+        W = int(c['width'])
+        for y0, y1, code in self._lang_rows:
+            on, hov = code == LANG, code == self._lang_hover
+            if on or hov:
+                round_rect(c, 10 * Z, y0 + 3 * Z, W - 10 * Z, y1 - 3 * Z, 10 * Z, fill=MINT if on else HOVER,
+                           outline=ACCENT if on else '', width=max(1, int(Z)), tags='row')
+            cx, cy, r = 32 * Z, (y0 + y1) / 2, 8 * Z
+            if on:  # 고른 언어: 채운 원 + 흰 체크
+                c.create_oval(cx - r, cy - r, cx + r, cy + r, fill=ACCENT, outline=ACCENT, tags='row')
+                c.create_line(cx - 4 * Z, cy, cx - 1 * Z, cy + 3 * Z, cx + 4 * Z, cy - 3 * Z, fill='#ffffff',
+                              width=max(2, int(2 * Z)), capstyle='round', joinstyle='round', tags='row')
+            else:
+                c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=DIM, width=max(1, int(1.5 * Z)), tags='row')
+            c.create_text(52 * Z, cy, text=dict(LANGS)[code], font=F['bodyb'] if on else F['body'],
+                          fill=ACC_TEXT if on else FG, anchor='w', tags='row')
+            if on:
+                c.create_text(W - 24 * Z, cy, text=T('사용 중'), font=F['small'], fill=ACC_TEXT, anchor='e', tags='row')
+
+    def _lang_row_at(self, y):
+        return next((code for y0, y1, code in self._lang_rows if y0 <= y < y1), None)
+
+    def _lang_motion(self, y):
+        code = self._lang_row_at(y)
+        if code != self._lang_hover:
+            self._lang_hover = code
+            self._draw_lang_rows()
+
+    def _lang_click(self, e):
+        code = self._lang_row_at(e.y)
+        if code:
+            self.close_lang()
+            self.set_lang(code)
+
+    def _lang_outside(self, e):
+        c = getattr(self, 'lang_card', None)
+        if c and self._lang_armed and str(e.widget) != str(c):
+            self.close_lang()
+
+    def close_lang(self):
+        c = getattr(self, 'lang_card', None)
+        if c:
+            self.lang_card = None
+            c.destroy()
+            return True
+        return False
 
     def set_lang(self, code):
         if code == LANG:
@@ -3080,24 +3559,12 @@ class App:
             self.chips[key] = l
         # 오른쪽 위 조작부: 게임 메뉴를 열면 옆으로 밀려 사라진다
         self.menu_btn = self._btn(top, T('☰  메뉴'), self.toggle_menu, bg=ACCENT, fg='#ffffff', hover=ACC_DARK, font='menu')
+        # 기능 이동은 왼쪽 막대와 ☰ 메뉴가 맡고, 여기엔 글자 크기만 둔다
         self.tr = tr = tk.Frame(top, bg=TOPBG)
-        self.chat_btn = self._btn(tr, T('세션톡'), self.open_chat, bg=CARD, fg=ACC_TEXT, hover=HOVER)
-        self.chat_btn.configure(highlightbackground=ACCENT)
-        b_launch = self._btn(tr, T('세션 켜기'), self.open_launcher)
-        b_store = self._btn(tr, T('저장 공간'), self.open_storage)
-        c_anim = self._check(tr, T('움직임'), self.anim_on)
-        c_top = self._check(tr, T('항상 위'), self.topmost, self.toggle_top)
-        z_minus = self._btn(tr, T('가-'), lambda: self.set_zoom(-1))
+        self._btn(tr, T('가-'), lambda: self.set_zoom(-1)).pack(side='left')
         self.zoom_lbl = tk.Label(tr, text='', font=F['stat'], bg=TOPBG, fg=DIM, width=5)
-        z_plus = self._btn(tr, T('가+'), lambda: self.set_zoom(1))
-        # 쌓는 순서 그대로 기억해 두었다가(_fit_top이 다시 쌓음), 자리가 모자라면 tr_opt 순서로 숨긴다
-        self.tr_all = [(self.chat_btn, dict(side='left', padx=(0, 8))), (b_launch, dict(side='left', padx=(0, 8))),
-                       (b_store, dict(side='left', padx=(0, 10))), (c_anim, dict(side='left', padx=4)),
-                       (c_top, dict(side='left', padx=(4, 12))), (z_minus, dict(side='left')),
-                       (self.zoom_lbl, dict(side='left')), (z_plus, dict(side='left'))]
-        for w, kw in self.tr_all:
-            w.pack(**kw)
-        self.tr_opt = [c_anim, c_top, b_store, b_launch]
+        self.zoom_lbl.pack(side='left')
+        self._btn(tr, T('가+'), lambda: self.set_zoom(1)).pack(side='left')
         self.zoom_lbl.configure(text=f'{self.Z * 100:.0f}%')
         self.menu_btn.place(relx=1.0, rely=0.5, x=-18, anchor='e')
         self.root.after(50, lambda: self._place_tr(0))
@@ -3116,14 +3583,9 @@ class App:
             self.root.after_idle(self._fit_top)
 
     def _fit_top(self):
-        """창이 좁거나 글자가 커서 겹치면: 상태 칩(뒤에서부터) → 오른쪽 조작부의 덜 중요한 것 → 부제목 순으로 숨긴다.
-        숨긴 것은 모두 ☰ 메뉴에 있다."""
-        if not getattr(self, 'tr_all', None) or not self.tr.winfo_ismapped():
+        """창이 좁거나 글자가 커서 겹치면 상태 칩(뒤에서부터) → 부제목 순으로 숨긴다."""
+        if not getattr(self, 'tr', None) or not self.tr.winfo_ismapped():
             return
-        for w, kw in self.tr_all:
-            w.pack_forget()
-        for w, kw in self.tr_all:
-            w.pack(**kw)
         self.brand_sub.pack(side='left', padx=(8, 0), pady=(3, 0))
         keys = ('busy', 'wait', 'idle', 'sleep')
         for k in keys:
@@ -3134,30 +3596,11 @@ class App:
         def right():
             return self.tr.winfo_x() - 12
 
-        def overlap():
-            last = self.chips['sleep']
-            return last.winfo_x() + last.winfo_width() > right()
-
-        def hide(w):
-            w.pack_forget()
-            self._place_tr_now()
-            self.top.update_idletasks()
-
-        # 움직임·항상 위 체크 → 상태 칩(뒤에서부터) → 저장 공간·세션 켜기 버튼 순 (모두 ☰ 메뉴에도 있다)
-        for w in self.tr_opt[:2]:
-            if not overlap():
-                break
-            hide(w)
         for k in reversed(keys[1:]):
             l = self.chips[k]
             if l.winfo_x() + l.winfo_width() > right():
                 l.pack_forget()
                 self.top.update_idletasks()
-        for w in self.tr_opt[2:]:
-            last = self.chips['busy']
-            if last.winfo_x() + last.winfo_width() <= right():
-                break
-            hide(w)
         if self.brand.winfo_x() + self.brand.winfo_width() > right():
             self.brand_sub.pack_forget()
 
@@ -3169,6 +3612,7 @@ class App:
             unread = 0
         return [('menu', T('메뉴'), self.toggle_menu, 0), ('home', T('사무실'), lambda: (self.toggle_menu(False), self.show_office()), 0),
                 ('chat', T('세션톡'), self.open_chat, unread), ('star', T('비서'), self.open_secretary, len(self.sec_items())),
+                ('meet', T('회의실'), self.open_meeting, 0),
                 ('power', T('세션 켜기'), self.open_launcher, 0), ('folder', T('저장 공간'), self.open_storage, 0)]
 
     def draw_side(self, force=False):
@@ -3187,14 +3631,14 @@ class App:
             h = 66 * Z
             on = key == ('menu' if self.menu_open else self.page_key if self.page else 'home')
             if on:  # 고른 칸은 본문 바탕색으로 이어 붙인다
-                round_rect(c, 10 * Z, y, W + 30 * Z, y + h, 20 * Z, fill=BG, outline='')
+                round_rect(c, 5 * Z, y, W + 30 * Z, y + h, 18 * Z, fill=BG, outline='')
             elif i == self.side_hover:
-                round_rect(c, 10 * Z, y, W - 10 * Z, y + h, 16 * Z, fill=SIDE_HOVER, outline='')
+                round_rect(c, 5 * Z, y, W - 5 * Z, y + h, 16 * Z, fill=SIDE_HOVER, outline='')
             col = (ACCENT if DARK else SIDE) if on else '#ffffff'
-            wrap = F['tiny'].measure(label) > W - 10 * Z  # 긴 이름(번역)은 두 줄로
+            wrap = F['tiny'].measure(label) > W - 12 * Z  # 긴 이름(번역)은 두 줄로
             draw_icon(c, key, W / 2, y + (22 if wrap else 26) * Z, 13 * Z, col, BG if on else SIDE)
             c.create_text(W / 2, y + (50 if wrap else 52) * Z, text=label, font=F['tiny'], fill=ACC_TEXT if on else '#eafff6',
-                          width=W - 10 * Z, justify='center')
+                          width=W - 12 * Z, justify='center')
             if n:
                 c.create_oval(W / 2 + 10 * Z, y + 8 * Z, W / 2 + 19 * Z, y + 17 * Z, fill=RED, outline='#ffffff', width=Z)
             self.side_boxes.append((y, y + h, fn))
@@ -3229,6 +3673,7 @@ class App:
                  ('star', T('비서 제안'), self.open_secretary, '', len(self.sec_items())),
                  ('spark', T('브리핑 받기') if has_sec else T('비서 만들기'), self.ask_brief if has_sec else self.create_secretary,
                   T('브리핑 중') if self.briefing() else '', 0),
+                 ('meet', T('회의실'), self.open_meeting, '', 0),
                  ('power', T('세션 켜기'), self.open_launcher, '', 0),
                  ('user', T('아바타'), lambda: self.open_avatar(self.sel), '', 0),
                  ('tab', T('새 탭'), lambda: (self.toggle_menu(False), self._tab_edit(None)), '', 0),
@@ -3315,7 +3760,7 @@ class App:
         if i is None:
             return
         _x0, _y0, _x1, _y1, fn, icon = self.menu_boxes[i]
-        if icon in ('chat', 'star', 'power', 'user', 'folder', 'spark'):
+        if icon in ('chat', 'star', 'meet', 'power', 'user', 'folder', 'spark'):
             self.toggle_menu(False)  # 창을 여는 칸은 메뉴를 닫고 연다
         fn()
         if self.menu_open:
@@ -4380,7 +4825,6 @@ class App:
                     self.update_desk(d, by_sid[sid])
             if self.chatwin and self.chatwin.win.winfo_exists():
                 self.chat_seen, unread = now, 0
-            self.chat_btn.configure(text=T('세션톡  {0}').format(unread) if unread else T('세션톡'))
             self.draw_side()
             b = self.briefing()
             if b or getattr(self, '_was_brief', False):  # '브리핑 중…' 점 움직임, 끝나면 한 번 더
@@ -4658,10 +5102,13 @@ class App:
         if sid:
             w.set_room(sid)
         self.chat_seen = time.time()
-        self.chat_btn.configure(text=T('세션톡'))
+        self.draw_side()
 
     def open_secretary(self):
         self._open_win('secwin', lambda: SecretaryWin(self))
+
+    def open_meeting(self):
+        self._open_win('meetwin', lambda: MeetingWin(self))
 
     def sec_mark(self, key, done=True):
         if done:
