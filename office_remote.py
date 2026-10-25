@@ -1024,13 +1024,22 @@ def api_state(r, dev, q, body):
                           'url': it.get('url') if str(it.get('url') or '').startswith(('http://', 'https://')) else '',
                           'done': it['_key'] in app.sec_done,
                           'choices': [{'i': i, 'label': ch['label'], 'on': bool(ch.get('sid'))}
-                                      for i, ch in enumerate(app.sec_choices(it))]})
+                                      for i, ch in enumerate(app.sec_choices(it))],
+                          'result': _sec_result(app.sec_result(it['_key']))})
         return {'v': 1, 'lang': co.LANG, 'sessions': out, 'chat_ver': chat_ver,
                 'sec': {'sid': app.sec_sid, 'summary': _clip(sec.get('summary'), 600), 'updated': sec.get('updatedAt'),
                         'briefing': app.briefing(), 'items': items},
                 'meeting': _meeting(r), 'alerts': r.alerts[-10:]}
 
     return r.ui(build)
+
+
+def _sec_result(res):
+    """비서 제안으로 맡긴 일의 진행 결과 (휴대폰에 보낼 만큼만)."""
+    if not res:
+        return None
+    return {'state': res['state'], 'sid': res['sid'], 'name': _clip(res['name'], 60), 'label': _clip(res['label'], 30),
+            'ts': res['ts'], 'answer': _clip(res['answer'], 3000)}
 
 
 def _meeting(r):
@@ -1053,18 +1062,22 @@ def _meeting(r):
             for it in (rep.get('items') or [])[:20]:
                 if not isinstance(it, dict):
                     continue
-                imgs = []
-                for p in it.get('images') or []:
-                    name_ = os.path.basename(str(p))
+                imgs, shots = [], []
+                for p, cap, foc in co.report_shots(it):
+                    name_ = os.path.basename(p)
                     if re.fullmatch(r'[\w.-]+\.(png|gif)', name_, re.I) and os.path.isfile(os.path.join(folder, name_)):
                         imgs.append(name_)
+                        shots.append({'name': name_, 'caption': cap, 'focus': list(foc) if foc else None})
                 items.append({'request': _clip(it.get('request'), 300), 'status': it.get('status') or 'done',
                               'result': _clip(it.get('result'), 2000), 'files': [_clip(f, 200) for f in (it.get('files') or [])[:8]],
-                              'images': imgs})
+                              'images': imgs, 'shots': shots})
+            hl, ms, chs = co.report_extras(rep)
+            # 그래프는 PC에서 배치까지 끝내 보낸다 (휴대폰은 조각만 그림). 색은 휴대폰 테마 색으로 바꿔 쓰도록 이름만
+            charts = [{'title': c['title'], 'prims': co.chart_layout(c, 600, 300, 'FG', 'DIM', 'GRID')} for c in chs]
             rep = {'title': _clip(rep.get('title'), 200), 'summary': _clip(rep.get('summary'), 1500), 'items': items,
-                   'next': _clip(rep.get('next'), 800)}
+                   'next': _clip(rep.get('next'), 800), 'highlights': hl, 'metrics': ms, 'charts': charts}
         roster.append({'sid': sid, 'name': name, 'mode': mode, 'report': rep, 'av': r.app.avatars.get(sid) or {}})
-    return {'id': m['id'], 'started': m.get('startedAt'), 'turns': m.get('turns'), 'roster': roster,
+    return {'id': m['id'], 'started': m.get('startedAt'), 'turns': m.get('turns'), 'style': m.get('style') or 'brief', 'roster': roster,
             'presented': m.get('presented') or []}
 
 
@@ -1150,9 +1163,10 @@ def api_secmark(r, dev, q, body):
 def api_meet_start(r, dev, q, body):
     sids = [str(x) for x in body.get('sids') or []][:12]
     turns = int(body.get('turns') or 3)
+    style = body.get('style') if body.get('style') in r.co.MEET_STYLES else 'brief'
     if turns not in r.co.MEET_TURNS or not sids:
         raise ValueError('sids/turns')
-    return r.ui(lambda: {'ok': True, 'sent': r.co.meeting_start(r.app, sids, turns)})
+    return r.ui(lambda: {'ok': True, 'sent': r.co.meeting_start(r.app, sids, turns, style)})
 
 
 def api_meet_end(r, dev, q, body):

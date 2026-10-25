@@ -46,6 +46,23 @@ const STR = {
   pinMeet: ['회의실 화면 고정', 'Pin the meeting scene', '会議室の画面を固定', '固定会议室画面'],
   pinnedMeet: ['회의실 화면을 위에 고정했어요', 'Meeting scene pinned to the top', '会議室の画面を上に固定しました', '已将会议室画面固定在顶部'],
   unpinnedMeet: ['고정을 풀었어요', 'Unpinned', '固定を解除しました', '已取消固定'],
+  reportStyle: ['보고 방식', 'Report style', '報告の形式', '报告方式'],
+  styleBrief: ['간단 · 토큰 절약', 'Brief · fewer tokens', '簡単 · トークン節約', '简要 · 节省令牌'],
+  styleRich: ['상세 · 수치·그래프·확대', 'Detailed · figures, charts, zoom', '詳細 · 数値・グラフ・拡大', '详细 · 数据·图表·放大'],
+  styleNoteBrief: ['요청별 결과와 캡처만 정리해요. 세션이 쓰는 토큰이 적어요.', 'Results and captures per request only. Sessions use fewer tokens.', '依頼ごとの結果とキャプチャだけをまとめます。セッションのトークン消費が少なめです。', '只整理每个请求的结果和截图。会话消耗的令牌较少。'],
+  styleNoteRich: ['핵심 줄·핵심 수치·그래프를 더 적고 캡처의 중요한 부분을 표시해요. 보기 쉽지만 세션이 토큰을 더 써요.', 'Adds key points, figures and charts, and marks the important part of each capture. Easier to read, but sessions use more tokens.', '要点・主要数値・グラフを加え、キャプチャの重要な部分を示します。見やすい反面、セッションのトークン消費が増えます。', '增加要点、关键数据和图表，并标出截图中的重点部分。更易阅读，但会话会消耗更多令牌。'],
+  keyPts: ['핵심', 'Key points', '要点', '要点'], chartOf: ['그래프 · {0}', 'Chart · {0}', 'グラフ · {0}', '图表 · {0}'],
+  figures: ['수치', 'Figures', '数値', '数据'], zoomed: ['중요한 부분을 확대했어요', 'Zoomed in on the important part', '重要な部分を拡大しました', '已放大重点部分'],
+  docsBig: ['문서 크게 보기', 'Enlarge documents', '資料を大きく表示', '放大文档'], docsScene: ['회의 장면 보기', 'Show meeting scene', '会議の場面を表示', '显示会议场景'],
+  resultTitle: ['진행 결과', 'Outcome', '進行結果', '进展结果'], openInTalk: ['세션톡에서 자세히 보기', 'Open in SessionTalk', 'セッショントークで詳しく', '在会话聊天中查看详情'],
+  rs_sent: ['요청 보냄', 'Sent', '依頼済み', '已发送'], rs_working: ['진행 중', 'In progress', '進行中', '进行中'],
+  rs_done: ['결과 도착', 'Result in', '結果あり', '已有结果'], rs_off: ['세션 꺼짐', 'Session off', 'セッションオフ', '会话已关闭'],
+  rsSentText: ['세션이 아직 이 요청을 받지 않았어요 (하던 일을 마치면 받아요).', 'The session has not picked this up yet (it will after its current task).', 'セッションはまだこの依頼を受け取っていません（今の作業が終わると受け取ります）。', '会话尚未接收此请求（完成当前任务后会接收）。'],
+  rsWorkingText: ['세션이 이 일을 하는 중이에요.', 'The session is working on it.', 'セッションが作業中です。', '会话正在处理。'],
+  rsOffText: ['맡긴 세션이 꺼져 있어 결과를 볼 수 없어요.', 'The session is off, so the result is unavailable.', 'セッションがオフのため結果を表示できません。', '会话已关闭，无法查看结果。'],
+  more_: ['더 보기', 'More', 'もっと見る', '展开'],
+  pinnedSec: ['고정한 세션', 'Pinned', '固定したセッション', '已置顶'], pinOn: ['대화 상대 목록 위에 고정했어요', 'Pinned to the top', '一覧の上に固定しました', '已置顶'],
+  pinOff: ['고정을 풀었어요', 'Unpinned', '固定を解除しました', '已取消置顶'],
   members: ['대화상대', 'Members', 'メンバー', '成员'], searchName: ['이름 검색', 'Search names', '名前で検索', '搜索名称'],
   allRoom: ['전체 채팅방', 'All chats', '全体チャット', '全部聊天'], allRoomSub: ['모든 세션의 대화를 한곳에서', 'Every session in one place', 'すべてのセッションの会話をまとめて', '所有会话的对话'],
   sessionsN: ['세션 {0}', 'Sessions {0}', 'セッション {0}', '会话 {0}'], noMatch: ['찾는 세션이 없어요', 'No matching session', '該当するセッションがありません', '没有匹配的会话'],
@@ -628,13 +645,22 @@ function fillSession() {
 // ───────────── 세션톡 ─────────────
 let room = localStorage.getItem('co.room') || '*', chatData = null, chatSig = '';
 let roomsOpen = localStorage.getItem('co.roomsOpen') !== '0', talkComposer = null, talkComposerRoom = null;
+// 중요한 세션은 대화 상대 목록 위에 고정 (이 기기에 기억)
+let pins = JSON.parse(localStorage.getItem('co.pins') || '[]');
+function togglePin(sid) {
+  pins = pins.includes(sid) ? pins.filter(x => x !== sid) : [...pins, sid].slice(-20);
+  localStorage.setItem('co.pins', JSON.stringify(pins));
+  toast(t(pins.includes(sid) ? 'pinOn' : 'pinOff'));
+  buzz();
+}
+function pinSort(list) { return [...list.filter(s => pins.includes(s.sid)).sort((a, b) => pins.indexOf(a.sid) - pins.indexOf(b.sid)), ...list.filter(s => !pins.includes(s.sid))]; }
 function viewTalk(v) {
   const rooms = h('div', { class: 'rooms' });
   rooms.append(h('button', { class: 'room' + (room === '*' ? ' on' : ''), onclick: () => setRoom('*') }, h('div', { class: 'all', text: '#' }), h('span', { text: t('all') })));
-  state.sessions.forEach(s => {
+  pinSort(state.sessions).forEach(s => {
     const img = h('img');
     sprite(s.sid, poseOf(s.mode), img);
-    rooms.append(h('button', { class: 'room' + (room === s.sid ? ' on' : ''), onclick: () => setRoom(s.sid) }, img, h('span', { text: s.name })));
+    rooms.append(h('button', { class: 'room' + (room === s.sid ? ' on' : '') + (pins.includes(s.sid) ? ' pinned' : ''), onclick: () => setRoom(s.sid) }, img, h('span', { text: s.name })));
   });
   // 방 목록은 위에 고정되고, 버튼으로 접고 편다 (접어도 지금 방은 보인다)
   const cur = state.sessions.find(s => s.sid === room);
@@ -884,16 +910,25 @@ function fillDrawer() {
   const order = { wait: 0, busy: 1, idle: 2, sleep: 3 };
   const hits = [...ss].filter(s => !qq || (s.name || '').toLowerCase().includes(qq) || (s.goal || '').toLowerCase().includes(qq))
     .sort((a, b) => order[a.mode] - order[b.mode]);
-  list.append(h('div', { class: 'dr-sec', text: t('sessionsN', hits.length) }));
-  if (!hits.length) list.append(h('div', { class: 'dr-empty', text: t('noMatch') }));
-  hits.forEach(s => {
+  const row = s => {
     const pf = avatar(s.sid, s.mode);
     pf.className = 'pf';
-    list.append(h('button', { class: 'dr-row' + (room === s.sid ? ' on' : ''), onclick: () => pick(s.sid) }, pf,
+    const on = pins.includes(s.sid);
+    const pin = h('span', { class: 'dr-pin' + (on ? ' on' : ''), role: 'button', 'aria-label': 'pin', onclick: e => { e.stopPropagation(); togglePin(s.sid); fillDrawer(); render(true); } });
+    pin.innerHTML = PIN_SVG;  // 고정 아이콘만 (PC 데이터 아님)
+    return h('button', { class: 'dr-row' + (room === s.sid ? ' on' : ''), onclick: () => pick(s.sid) }, pf,
       h('div', { class: 'grow' }, h('div', { class: 'row', style: 'gap:6px' }, h('div', { class: 'nm ell grow', text: s.name }), chip(s.mode)),
         h('div', { class: 'st-msg ell', text: s.goal || s.tool || s.cwd || '' })),
-      room === s.sid ? h('span', { class: 'chk', text: '✓' }) : null));
-  });
+      room === s.sid ? h('span', { class: 'chk', text: '✓' }) : null, pin);
+  };
+  const pinned = pinSort(hits.filter(s => pins.includes(s.sid))), rest = hits.filter(s => !pins.includes(s.sid));
+  if (pinned.length) {
+    list.append(h('div', { class: 'dr-sec', text: t('pinnedSec') + ' ' + pinned.length }));
+    pinned.forEach(s => list.append(row(s)));
+  }
+  list.append(h('div', { class: 'dr-sec', text: t('sessionsN', rest.length) }));
+  if (!hits.length) list.append(h('div', { class: 'dr-empty', text: t('noMatch') }));
+  rest.forEach(s => list.append(row(s)));
   list.scrollTop = keep;
 }
 // 서랍은 오른쪽으로 끌면 손가락을 따라가다 닫힌다
@@ -1023,12 +1058,31 @@ function viewSec(v) {
       h('div', {}, h('span', { class: 'kind k-' + it.kind, text: t('kinds.' + it.kind) }), h('b', { text: it.title })),
       it.target ? h('div', { class: 'small', text: '→ ' + it.target }) : null,
       it.detail ? h('details', {}, h('summary', { text: '…' }), h('div', { class: 'text2', style: 'white-space:pre-wrap;font-size:14px', text: it.detail })) : null,
-      btns));
+      btns, secResult(it.result)));
   });
+}
+
+// 비서 제안으로 맡긴 일의 진행 결과: 답변 앞부분(길면 접힘) + 세션톡에서 자세히 보기
+const RS_COL = { sent: '#f0a020', working: '#5b9ee8', done: '#2fb985', off: '#8a96a3' };
+function secResult(res) {
+  if (!res) return null;
+  const body = res.answer ? h('div', { class: 'md sec-ans' }, md(res.answer)) : h('div', { class: 'small', text: t({ sent: 'rsSentText', working: 'rsWorkingText', off: 'rsOffText' }[res.state] || 'rsSentText') });
+  const box = h('div', { class: 'sec-result' },
+    h('div', { class: 'row', style: 'gap:6px;flex-wrap:wrap' }, h('b', { text: t('resultTitle') }),
+      h('span', { class: 'st', style: 'background:' + (RS_COL[res.state] || RS_COL.sent), text: t('rs_' + res.state) }),
+      h('span', { class: 'small', text: `${res.name} · ${res.label} · ${ago(res.ts)}` })),
+    body,
+    h('button', { class: 'btn line', style: 'margin-top:8px', text: t('openInTalk'), onclick: () => { setRoom(res.sid); go('talk'); } }));
+  if (res.answer && res.answer.length > 280) {  // 길면 접어 두고 더 보기
+    body.classList.add('clamp');
+    box.insertBefore(h('button', { class: 'linkish', text: t('more_'), onclick: e => { body.classList.remove('clamp'); e.currentTarget.remove(); } }), box.lastChild);
+  }
+  return box;
 }
 
 // ───────────── 회의실 ─────────────
 let meetPick = new Set(JSON.parse(localStorage.getItem('co.meetPick') || '[]')), meetTurns = 3;
+let meetStyle = localStorage.getItem('co.meetStyle') === 'rich' ? 'rich' : 'brief';
 let talk = { sid: null, pages: [], pi: 0, n: 0, timer: null, text: '' };
 const ST = { done: ['stDone', '#2fb985'], partial: ['stPartial', '#f0a020'], todo: ['stTodo', '#e8505b'] };
 // 회의실 장면(무대+대사 창)을 핀으로 위에 고정: 회의록을 내려 읽어도 발표가 보인다 (기기에 기억)
@@ -1048,7 +1102,13 @@ function viewMeet(v) {
   } });
   pin.innerHTML = PIN_SVG;  // 고정 아이콘만 (PC 데이터 아님)
   top.append(stage(m), dialog(m), pin);
-  v.append(top);
+  const docs = document.body.classList.contains('meet-docs');
+  v.append(top, h('div', { class: 'docbar' }, h('button', { class: 'btn line', text: (docs ? '▣ ' : '⤢ ') + t(docs ? 'docsScene' : 'docsBig'), onclick: () => {
+    const on = !document.body.classList.contains('meet-docs');
+    document.body.classList.toggle('meet-docs', on);
+    localStorage.setItem('co.meetDocs', on ? '1' : '0');
+    buzz(); render(true); window.scrollTo(0, 0);
+  } })));
   if (!m) {
     const pick = h('div', { class: 'pick' });
     state.sessions.forEach(s => {
@@ -1065,13 +1125,21 @@ function viewMeet(v) {
     [1, 3, 5, 10].forEach(n => turns.append(h('button', { class: n === meetTurns ? 'on' : '', text: n === 1 ? t('turn1') : t('turnN', n), onclick: e => {
       meetTurns = n; turns.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === e.currentTarget));
     } })));
+    const styles = h('div', { class: 'chips' });
+    const styleNote = h('div', { class: 'small', style: 'margin-top:6px', text: t(meetStyle === 'rich' ? 'styleNoteRich' : 'styleNoteBrief') });
+    [['brief', 'styleBrief'], ['rich', 'styleRich']].forEach(([k, key]) => styles.append(h('button', { class: k === meetStyle ? 'on' : '', text: t(key), onclick: e => {
+      meetStyle = k; localStorage.setItem('co.meetStyle', k);
+      styles.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === e.currentTarget));
+      styleNote.textContent = t(k === 'rich' ? 'styleNoteRich' : 'styleNoteBrief');
+    } })));
     v.append(h('div', { class: 'card' }, h('b', { text: t('invite') }), h('div', { style: 'margin-top:8px' }, pick),
       h('div', { style: 'margin:12px 0 6px' }, h('b', { text: t('range') })), turns,
+      h('div', { style: 'margin:12px 0 6px' }, h('b', { text: t('reportStyle') })), styles, styleNote,
       h('button', { class: 'btn pri block', style: 'margin-top:14px', text: t('start'), onclick: async e => {
         const sids = [...meetPick].filter(x => state.sessions.some(s => s.sid === x));
         if (!sids.length) return toast(t('invite'), true);
         e.currentTarget.disabled = true;
-        try { await api('/api/meeting/start', { sids, turns: meetTurns }); toast(t('sent')); poll(); } catch (er) { toast(t('err', er.message), true); e.currentTarget.disabled = false; }
+        try { await api('/api/meeting/start', { sids, turns: meetTurns, style: meetStyle }); toast(t('sent')); poll(); } catch (er) { toast(t('err', er.message), true); e.currentTarget.disabled = false; }
       } })));
     return;
   }
@@ -1080,13 +1148,17 @@ function viewMeet(v) {
     const card = h('div', { class: 'card', style: `animation-delay:${i * 50}ms` },
       h('div', { class: 'row' }, avatar(r.sid, 'idle', 's'), h('div', { class: 'grow' }, h('div', { class: 'name', text: r.name }), h('div', { style: 'color:var(--acc-text);font-weight:700', text: rep.title })),
         h('button', { class: 'btn line', text: t('presentAgain'), onclick: () => { present(r.sid); window.scrollTo({ top: 0, behavior: 'smooth' }); } })),
-      rep.summary ? h('div', { class: 'text2', style: 'margin-top:8px;font-size:14px;white-space:pre-wrap', text: rep.summary }) : null);
+      rep.summary ? h('div', { class: 'text2', style: 'margin-top:8px;font-size:14px;white-space:pre-wrap', text: rep.summary }) : null,
+      extras(rep));
     rep.items.forEach(it => {
       const st = ST[it.status] || ST.done;
       card.append(h('div', { style: 'border-top:1px solid var(--edge);margin-top:10px;padding-top:8px' },
         h('div', {}, h('span', { class: 'st', style: 'background:' + st[1], text: t(st[0]) }), h('b', { text: it.request })),
         it.result ? h('div', { class: 'text2', style: 'font-size:14px;white-space:pre-wrap;margin-top:4px', text: it.result }) : null,
-        it.images.length ? h('div', { class: 'thumbs' }, it.images.map((n, k) => meetImg(m.id, n, h('img', { alt: '', onclick: () => openViewer(m.id, it.images, k) })))) : null));
+        it.images.length ? h('div', { class: 'thumbs' }, (it.shots || it.images.map(n => ({ name: n }))).map((s, k) => h('figure', { class: 'shot' },
+          h('div', { class: 'pics' }, meetImg(m.id, s.name, h('img', { alt: '', onclick: () => openViewer(m.id, it.images, k) })),
+            s.focus ? cropEl(m.id, s.name, s.focus, () => openViewer(m.id, it.images, k)) : null),
+          s.caption || s.focus ? h('figcaption', { text: (s.focus ? '🔍 ' : '') + (s.caption || t('zoomed')) }) : null))) : null));
     });
     if (rep.next) card.append(h('div', { class: 'small', style: 'margin-top:8px', text: t('next') + rep.next }));
     v.append(card);
@@ -1111,7 +1183,17 @@ function drawStage(m, st = $('#stage')) {
   st.textContent = '';
   const page = talk.pages[talk.pi];
   const scr = h('div', { class: 'screen' });
-  if (page && page.images && page.images.length && m) {
+  if (page && page.vis && m) {
+    if (page.vis.chart) scr.append(chartSvg(page.vis.chart));
+    else if (page.vis.metrics) scr.append(metricsEl(page.vis.metrics, true));
+    else if (page.vis.crop) {
+      const ims = page.images.slice();
+      scr.append(cropEl(m.id, page.vis.crop.name, page.vis.crop.focus, () => openViewer(m.id, ims, 0)), h('span', { class: 'zoom-tag', text: '🔍' }));
+      scr.classList.add('tap');
+    }
+    scr.classList.add('vis');
+  }
+  else if (page && page.images && page.images.length && m) {
     scr.append(meetImg(m.id, page.images[0], h('img', { alt: '' })), h('span', { class: 'zoom-tag', text: '⤢' }));
     scr.classList.add('tap');
     const ims = page.images.slice();
@@ -1150,15 +1232,81 @@ function sysLine(m) {
 function pagesOf(rep) {
   const segs = [];
   const head = [rep.title, rep.summary].filter(Boolean).join('\n');
-  if (head) segs.push([head, []]);
-  rep.items.forEach(it => segs.push([`[${t((ST[it.status] || ST.done)[0])}] ${it.request}` + (it.result ? '\n' + it.result : ''), it.images]));
-  if (rep.next) segs.push([t('next') + rep.next, []]);
+  if (head) segs.push([head, [], null]);
+  const hl = rep.highlights || [], ms = rep.metrics || [];
+  if (hl.length || ms.length) segs.push([t('keyPts') + '\n' + (hl.length ? hl.map(x => '• ' + x) : ms.map(x => x.label + ' ' + x.value)).join('\n'), [], ms.length ? { metrics: ms } : null]);
+  (rep.charts || []).forEach(c => segs.push([t('chartOf', c.title || t('figures')), [], { chart: c }]));
+  rep.items.forEach(it => {
+    segs.push([`[${t((ST[it.status] || ST.done)[0])}] ${it.request}` + (it.result ? '\n' + it.result : ''), it.images, null]);
+    (it.shots || []).forEach(s => {  // 중요한 부분은 확대해서 한 장 더
+      if (s.focus) segs.push(['🔍 ' + (s.caption || t('zoomed')), [s.name], { crop: s }]);
+      else if (s.caption) segs.push(['🖼 ' + s.caption, [s.name], null]);
+    });
+  });
+  if (rep.next) segs.push([t('next') + rep.next, [], null]);
   const pages = [];
-  for (const [text, images] of segs) {  // 대사 창 한 번에 약 120자
+  for (const [text, images, vis] of segs) {  // 대사 창 한 번에 약 120자
     const parts = text.match(/[\s\S]{1,120}(?=\s|$)|[\s\S]{1,120}/g) || [text];
-    parts.forEach(p => pages.push({ text: p.trim(), images }));
+    parts.forEach(p => pages.push({ text: p.trim(), images, vis }));
   }
   return pages;
+}
+// ── 상세 보고 그리기: 그래프(PC가 배치한 조각 → SVG), 핵심 수치, 캡처의 중요한 부분 확대 ──
+const SVGNS = 'http://www.w3.org/2000/svg';
+const CHART_VAR = { FG: 'var(--fg)', DIM: 'var(--dim)', GRID: 'var(--edge)' };
+function svgEl(tag, attrs, style) {
+  const el = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (style) el.style.cssText = style;
+  return el;
+}
+function wedgePath(cx, cy, r, a0, ext) {
+  const rad = a => a * Math.PI / 180, a1 = a0 + ext;
+  const x1 = cx + r * Math.cos(rad(a0)), y1 = cy - r * Math.sin(rad(a0)), x2 = cx + r * Math.cos(rad(a1)), y2 = cy - r * Math.sin(rad(a1));
+  return `M${cx},${cy} L${x1},${y1} A${r},${r} 0 ${Math.abs(ext) > 180 ? 1 : 0} ${ext < 0 ? 1 : 0} ${x2},${y2} Z`;
+}
+function chartSvg(c) {
+  const col = x => CHART_VAR[x] || (/^#[0-9a-f]{6}$/i.test(x) ? x : 'currentColor');
+  const svg = svgEl('svg', { viewBox: '0 0 600 300', class: 'chart-svg', role: 'img' });
+  for (const p of c.prims || []) {
+    const n = v => Number(v) || 0;
+    if (p[0] === 'rect') svg.append(svgEl('rect', { x: n(p[1]), y: n(p[2]), width: Math.max(0, n(p[3]) - n(p[1])), height: Math.max(0, n(p[4]) - n(p[2])), rx: 2 }, `fill:${col(p[5])}`));
+    else if (p[0] === 'line') svg.append(svgEl('polyline', { points: (p[1] || []).map(n).join(' '), fill: 'none', 'stroke-width': n(p[3]), 'stroke-linejoin': 'round' }, `stroke:${col(p[2])}`));
+    else if (p[0] === 'text') {
+      const tx = svgEl('text', { x: n(p[1]), y: n(p[2]), 'font-size': n(p[4]), 'text-anchor': ['start', 'middle', 'end'].includes(p[6]) ? p[6] : 'start', 'dominant-baseline': 'middle', 'font-weight': p[7] ? 700 : 400 }, `fill:${col(p[5])}`);
+      tx.textContent = String(p[3]);
+      svg.append(tx);
+    } else if (p[0] === 'wedge') svg.append(svgEl('path', { d: wedgePath(n(p[1]), n(p[2]), n(p[3]), n(p[4]), n(p[5])), 'stroke-width': 2 }, `fill:${col(p[6])};stroke:var(--card)`));
+    else if (p[0] === 'dot') svg.append(svgEl('circle', { cx: n(p[1]), cy: n(p[2]), r: n(p[3]) }, `fill:${col(p[4])}`));
+  }
+  return svg;
+}
+const TONE = { good: '#2fb985', bad: '#e8505b' };
+function metricsEl(ms, mini) {
+  return h('div', { class: 'mt' + (mini ? ' mini' : '') }, ms.map(x => h('div', {},
+    h('small', { text: x.label }), h('b', { text: x.value, style: TONE[x.tone] ? 'color:' + TONE[x.tone] : '' }),
+    x.note ? h('small', { text: x.note, style: TONE[x.tone] ? 'color:' + TONE[x.tone] : '' }) : null)));
+}
+function extras(rep) {
+  const hl = rep.highlights || [], ms = rep.metrics || [], chs = rep.charts || [];
+  if (!hl.length && !ms.length && !chs.length) return null;
+  return h('div', { class: 'extras' },
+    hl.length ? h('div', { class: 'hl' }, h('span', { class: 'hl-tag', text: t('keyPts') }), hl.map(x => h('div', { text: '✔ ' + x }))) : null,
+    ms.length ? metricsEl(ms) : null,
+    chs.map(c => h('div', { class: 'chart-box' }, chartSvg(c))));
+}
+function cropEl(mid, name, focus, onclick) {  // 그림의 focus [x, y, 너비, 높이] 부분만 키워 보여 준다
+  const box = h('div', { class: 'crop', onclick: e => { e.stopPropagation(); onclick(); } });
+  const img = h('img', { alt: '' });
+  img.onload = () => {
+    const [x, y, w, hh] = focus.map(Number);
+    box.style.backgroundImage = `url("${img.src}")`;
+    box.style.backgroundSize = `${100 / w}% ${100 / hh}%`;
+    box.style.backgroundPosition = `${w < 1 ? x / (1 - w) * 100 : 0}% ${hh < 1 ? y / (1 - hh) * 100 : 0}%`;
+    box.style.aspectRatio = `${Math.max(1, w * img.naturalWidth)} / ${Math.max(1, hh * img.naturalHeight)}`;
+  };
+  meetImg(mid, name, img);
+  return box;
 }
 function present(sid) {
   const m = state.meeting;
@@ -1377,5 +1525,6 @@ $('#refresh-btn').onclick = () => { stateSig = ''; online ? poll() : connect(); 
 $('#menu-btn').onclick = () => { if (online && state) openDrawer(); };
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 if (conf.k) idbPut('conf', conf).catch(() => {});
+if (localStorage.getItem('co.meetDocs') === '1') document.body.classList.add('meet-docs');
 render();
 connect();

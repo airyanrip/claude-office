@@ -45,6 +45,7 @@ POLL_SEC = 2.0
 TAIL_BYTES = 4_000_000          # 시작할 때 로그용으로 읽는 대화 기록 끝부분
 QA_MAX = 8000                   # 대화 탭: 요청·답변 하나의 최대 글자 수
 QA_KEEP = 60                    # 대화 탭: 세션마다 기억하는 Q&A 수
+TALK_HISTORY = 20               # 세션톡: 세션마다 보여 주는 최근 대화 (터미널에서 직접 나눈 것 포함)
 QA_SCAN = 1_500_000_000         # 대화 탭: 요청을 찾으러 거슬러 올라가는 최대 바이트
 QA_ANSWER_SCAN = 64_000_000     # 대화 탭: 요청 하나의 답변을 찾는 최대 바이트
 LIVE_CHUNK = 16 * 1024 * 1024   # 한 번 폴링에 읽는 최대 바이트
@@ -1597,8 +1598,23 @@ MEET_TURNS = (1, 3, 5, 10)
 REPORT_ST = {'done': (T('완료'), '#2fb985'), 'partial': (T('일부'), '#f0a020'), 'todo': (T('못 함'), RED)}
 
 
-def meet_prompt(n, reqs, folder, sid):
-    """회의실에서 세션에 보내는 업무 보고 요청. 보고서는 folder/<sid>.json, 캡처는 folder/<sid>-N.png."""
+MEET_STYLES = ('brief', 'rich')   # 간단 보고(토큰 절약) / 상세 보고(핵심 수치·그래프·캡처 확대)
+REPORT_RICH = T('\n[상세 보고] 회사에서 보고하듯 한눈에 보이게 정리해 주세요. 위 JSON에 아래 칸을 더합니다.\n'
+                '· highlights: 사용자가 꼭 알아야 할 핵심 2~4줄.\n'
+                '· metrics: 직접 확인한 숫자만 2~6개 (테스트 통과 수, 걸린 시간, 바뀐 파일 수, 성능, 진행률 등). '
+                '추측한 숫자는 쓰지 마세요. tone은 good/bad/neutral.\n'
+                '· charts: 비교하거나 변화를 보여 줄 숫자가 있을 때만 1~3개. 그림 파일은 만들지 말고 데이터만 쓰면 회의실이 그려요. '
+                'type은 bar(비교)/line(변화)/pie(비율)이고, labels와 values 개수를 맞추세요.\n'
+                '· 캡처는 중요한 화면을 2~4장 찍고, 찍은 그림을 직접 열어 보고 가장 중요한 부분을 focus [x, y, 너비, 높이] '
+                '(그림 전체를 1로 본 비율)로, 무엇을 봐야 하는지를 caption으로 적으세요. 회의실이 그 부분을 확대해 보여 줘요.\n'
+                '"highlights":["..."],"metrics":[{"label":"테스트 통과","value":"41/42","note":"+3","tone":"good"}],'
+                '"charts":[{"title":"빌드 시간","type":"bar","unit":"초","labels":["전","후"],"series":[{"name":"빌드","values":[120,45]}]}]\n'
+                'items의 images 칸에는 {"file":"<sid>-1.png","caption":"무엇을 볼지","focus":[0.1,0.2,0.4,0.3]} 형식도 쓸 수 있어요.')
+
+
+def meet_prompt(n, reqs, folder, sid, style='brief'):
+    """회의실에서 세션에 보내는 업무 보고 요청. 보고서는 folder/<sid>.json, 캡처는 folder/<sid>-N.png.
+    style='rich'이면 핵심 수치·그래프 데이터·캡처의 중요한 부분(focus)까지 적게 한다 (세션이 토큰을 더 쓴다)."""
     lines = '\n'.join(f'{i}) {one_line(q, 160)}' for i, q in enumerate(reqs, 1)) or T('(기록을 찾지 못했어요. 최근 대화에서 직접 찾아 주세요)')
     report = os.path.join(folder, sid + '.json')
     shot = os.path.join(folder, sid + '-1.png')
@@ -1614,13 +1630,15 @@ def meet_prompt(n, reqs, folder, sid):
              '"items":[{{"request":"요청 요약","status":"done","result":"결과","files":["경로"],"images":["{6}"]}}],'
              '"next":"다음에 할 일","updatedAt":<현재 시각 ms>}}\n'
              '다 쓰면 "보고서를 올렸어요" 한 줄로 답하세요.').format(n, lines, CAPTURE_PS1, shot, report, sid,
-                                                          os.path.basename(shot))
+                                                          os.path.basename(shot)) + \
+        (REPORT_RICH.replace('<sid>', sid) if style == 'rich' else '')
 
 
-def meeting_start(app, sids, turns):
+def meeting_start(app, sids, turns, style='brief'):
     """고른 세션들에 업무 보고를 요청하고 meeting.json을 새로 쓴다 (회의실 화면·휴대폰 둘 다 쓴다). 보낸 수를 돌려준다."""
+    style = style if style in MEET_STYLES else 'brief'
     mid = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-    m = {'id': mid, 'startedAt': int(time.time() * 1000), 'turns': turns, 'members': [], 'names': {}}
+    m = {'id': mid, 'startedAt': int(time.time() * 1000), 'turns': turns, 'style': style, 'members': [], 'names': {}}
     folder = os.path.join(MEET_DIR, mid)
     os.makedirs(folder, exist_ok=True)
     head = meet_prompt(1, [], '', '').split(']', 1)[0] + ']'  # 지난 회의 요청은 보고할 턴에서 뺀다
@@ -1630,7 +1648,7 @@ def meeting_start(app, sids, turns):
                 for sid in sids if sid in app.mon.sessions]
     for sid, name, reqs in todo:
         try:
-            app.mon.send_user(sid, meet_prompt(turns, reqs, folder, sid))
+            app.mon.send_user(sid, meet_prompt(turns, reqs, folder, sid, style))
         except OSError as ex:
             app.toast(T('보내기 실패: {0}').format(ex), warn=True)
             continue
@@ -2466,6 +2484,7 @@ class ChatWin:
         self.sig = None
         self.room_sig = None
         self.room_ids, self.room_rows = None, {}
+        self.md_cache = {}
         self.dirty = True
         F, Z = app.fonts, app.Z
         self.win = w = app.make_host('chat')
@@ -2600,7 +2619,7 @@ class ChatWin:
             names = {s.sid: mon.display_name(s) for s in live}
             qa = {s.sid: [tuple(e) for e in s.qa] for s in live}
             modes = {s.sid: s.mode() for s in live}
-        out, typing = [], set()
+        out, typing, used = [], set(), set()
         for m in msgs:
             m = dict(m)
             out.append(m)
@@ -2611,6 +2630,7 @@ class ChatWin:
             hit = next((e for e in qa[m['to']] if e[0] >= m['ts'] - 30 and
                         (one_line(e[1]).startswith(want) or want.startswith(one_line(e[1])[:40]))), None)
             if hit:
+                used.add((m['to'], hit[0]))
                 m['read'] = True
                 if hit[3]:
                     out.append({'id': m['id'] + '-a', 'from': m['to'], 'fromLabel': names.get(m['to'], ''), 'to': 'user',
@@ -2618,6 +2638,17 @@ class ChatWin:
                                 'reply': True})
                 elif modes.get(m['to']) in ('busy', 'wait'):
                     typing.add(m['to'])
+        # 터미널에서 직접 나눈 대화도 세션마다 최근 TALK_HISTORY개 (세션톡에서 보낸 것은 위에서 이미 넣었다)
+        for sid, entries in qa.items():
+            for e in entries[-TALK_HISTORY:]:
+                if (sid, e[0]) in used or not e[1]:
+                    continue
+                out.append({'id': f'h-{sid[:8]}-{e[0]:.3f}', 'from': 'user', 'to': sid, 'fromLabel': T('나'),
+                            'toLabel': names.get(sid, ''), 'kind': 'question', 'text': e[1], 'ts': e[0], 'read': True, 'cli': True})
+                if e[3]:
+                    out.append({'id': f'h-{sid[:8]}-{e[0]:.3f}-a', 'from': sid, 'fromLabel': names.get(sid, ''), 'to': 'user',
+                                'toLabel': T('나'), 'kind': 'answer', 'text': e[3], 'ts': max(e[2], e[0] + 0.001), 'reply': True,
+                                'cli': True})
         out.sort(key=lambda m: m['ts'])
         return out, live, names, typing
 
@@ -2675,6 +2706,8 @@ class ChatWin:
             for sid in (m['from'], m['to']):
                 if sid not in rooms and sid not in ('user', '*', 'all', T('전체')) and len(sid) > 20:
                     rooms.append(sid)
+        pins = [p for p in self.app.cfg.get('chat_pins') or [] if p in rooms]  # 고정한 세션은 전체 대화 바로 아래
+        rooms = ['*'] + pins + [r for r in rooms[1:] if r not in pins]
         info = []
         for r in rooms:
             ms = [m for m in msgs if self.in_room(m, r)]
@@ -2683,7 +2716,7 @@ class ChatWin:
             label = T('전체 대화') if r == '*' else names.get(r) or next((m['fromLabel'] for m in ms if m['from'] == r), r[:8])
             info.append((r, label, md_plain(last['text'], 40) if last else '', last['ts'] if last else 0,
                          0 if r == self.room else unread))
-        sig = (tuple(info), self.room)
+        sig = (tuple(info), self.room, tuple(pins))
         if sig == self.room_sig:
             return
         self.room_sig = sig
@@ -2706,6 +2739,12 @@ class ChatWin:
             if when:
                 room_w -= F['small'].measure(when) + 6
             w['name'].configure(text=fit(label, F['bodyb'], room_w), fg=FG if r in names or r == '*' else DIM)
+            if w.get('pin'):
+                pc = w['pin']
+                pc.configure(bg=bg)
+                pc.delete('all')
+                s = int(pc['width'])
+                draw_icon(pc, 'pin', s / 2, s / 2, s * 0.36, ACCENT if r in pins else mix(EDGE, DIM, 0.35), bg)
             w['prev'].configure(text=fit(prev or T('아직 대화 없음'), F['small'], int(280 * self.app.Z) - 130))
             if unread:
                 w['badge'].configure(text=str(unread))
@@ -2729,6 +2768,11 @@ class ChatWin:
         tx.pack(side='left', fill='x', expand=True)
         top = tk.Frame(tx, bg=CARD)
         top.pack(fill='x')
+        pin = None
+        if r != '*':  # 누르면 이 세션을 목록 위에 고정 / 풀기
+            pin = tk.Canvas(top, width=int(18 * Z), height=int(18 * Z), bg=CARD, highlightthickness=0, cursor='hand2')
+            pin.pack(side='right', padx=(6, 0))
+            pin.bind('<Button-1>', lambda e, r=r: self.toggle_pin(r))
         when = tk.Label(top, text='', font=F['small'], bg=CARD, fg=DIM)
         when.pack(side='right')
         name = tk.Label(top, text='', font=F['bodyb'], bg=CARD, fg=FG, anchor='w')
@@ -2742,7 +2786,17 @@ class ChatWin:
         for wd in bgs + [ic, badge]:
             wd.bind('<Button-1>', lambda e, r=r: self.set_room(r))
             wd.bind('<MouseWheel>', lambda e: self.rooms_cv.yview_scroll(int(-e.delta / 120), 'units'))
-        return {'bgs': bgs, 'when': when, 'name': name, 'prev': prev, 'badge': badge}
+        return {'bgs': bgs, 'when': when, 'name': name, 'prev': prev, 'badge': badge, 'pin': pin}
+
+    def toggle_pin(self, sid):
+        pins = [p for p in self.app.cfg.get('chat_pins') or [] if p != sid]
+        if sid not in (self.app.cfg.get('chat_pins') or []):
+            pins.append(sid)
+        self.app.cfg['chat_pins'] = pins[-20:]
+        self.app.save_cfg()
+        self.app.toast(T('대화 상대 목록 위에 고정했어요') if sid in pins else T('고정을 풀었어요'))
+        self.room_sig = None
+        self.draw()
 
     @staticmethod
     def _when(ts):
@@ -2777,7 +2831,12 @@ class ChatWin:
                 y = y1 + 16 * Z
                 prev_from = None
             text = m['text'] if len(m['text']) <= 1200 else m['text'][:1200] + T(' …(이하 생략)')
-            ops, tw, th = md_layout(text, maxw, F)
+            key = (text, maxw, self.app.Z)
+            if key not in self.md_cache:
+                if len(self.md_cache) > 800:
+                    self.md_cache.clear()
+                self.md_cache[key] = md_layout(text, maxw, F)
+            ops, tw, th = self.md_cache[key]
             mine = m['from'] == 'user'
             kind = T('명령') if mine else (T('답변') if m.get('reply') else KIND_TEXT.get(m['kind'], ''))
             if mine:
@@ -2980,10 +3039,40 @@ class SecretaryWin:
             if url.startswith(('http://', 'https://')):
                 app._btn(bar, T('링크 열기'), lambda u=url: webbrowser.open(u)).pack(side='left', padx=(0, 6))
             app._btn(bar, T('다시 보이기') if done else T('확인함'), lambda k=key, d=done: app.sec_mark(k, not d)).pack(side='right')
+            self._result(card, app.sec_result(key))
         self._wrap(self.cv.winfo_width())
         self.inner.update_idletasks()
         self.cv.configure(scrollregion=self.cv.bbox('all'))
         self.cv.yview_moveto(pos if keep else 0)
+
+    def _result(self, card, res):
+        """비서 제안으로 맡긴 일의 진행 결과 (답변 앞부분 + 세션톡에서 자세히 보기)."""
+        if not res:
+            return
+        app, F = self.app, self.app.fonts
+        box = tk.Frame(card, bg=CARD2, padx=12, pady=10)
+        box.pack(fill='x', pady=(10, 0))
+        top = tk.Frame(box, bg=CARD2)
+        top.pack(fill='x')
+        label, col = SEC_RESULT_ST.get(res['state'], SEC_RESULT_ST['sent'])
+        tk.Label(top, text=T('진행 결과'), font=F['bodyb'], bg=CARD2, fg=FG).pack(side='left')
+        tk.Label(top, text=label, font=F['tiny'], bg=col, fg='#ffffff', padx=8, pady=1).pack(side='left', padx=8)
+        tk.Label(top, text=f'{res["name"]} · {res["label"]} · ' + datetime.datetime.fromtimestamp(res['ts']).strftime(T('%m월 %d일 %H:%M')),
+                 font=F['small'], bg=CARD2, fg=DIM).pack(side='left')
+        b = app._btn(top, T('세션톡에서 자세히 보기'), lambda sid=res['sid']: app.open_chat(sid), bg=CARD, fg=ACC_TEXT, hover=HOVER)
+        b.configure(highlightbackground=ACCENT)
+        b.pack(side='right')
+        text = md_plain(res['answer'], 420) if res['answer'] else {
+            'sent': T('세션이 아직 이 요청을 받지 않았어요 (하던 일을 마치면 받아요).'), 'working': T('세션이 이 일을 하는 중이에요.'),
+            'off': T('맡긴 세션이 꺼져 있어 결과를 볼 수 없어요.'), 'done': ''}[res['state']]
+        l = tk.Label(box, text=text, font=F['body'], bg=CARD2, fg=TEXT2, anchor='w', justify='left')
+        l.pack(fill='x', pady=(6, 0))
+        self.wraps.append(l)
+
+
+SEC_RESULT_ST = {'sent': (T('요청 보냄'), '#f0a020'), 'working': (T('진행 중'), '#5b9ee8'), 'done': (T('결과 도착'), '#2fb985'),
+                 'off': (T('세션 꺼짐'), '#8a96a3')}
+
 
 
 def grad_head(parent, app, icon, title, sub, height=88):
@@ -3263,6 +3352,279 @@ def wrap_text(text, font, px):
     return out
 
 
+# ── 상세 보고: 데이터 정리 (세션이 쓴 JSON은 믿지 않고 모양·크기를 맞춘다) ──
+CHART_COLS = ('#2fb985', '#5b9ee8', '#f0a020', '#9a86c8', '#e8505b', '#3cc6c9', '#8a96a3')
+TONE_COL = {'good': '#2fb985', 'bad': '#e8505b'}
+
+
+def _num(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return f if math.isfinite(f) else 0.0
+
+
+def norm_focus(v):
+    """[x, y, 너비, 높이] (0~1) → 그림 안으로 맞춘 튜플, 이상하면 None."""
+    if not isinstance(v, (list, tuple)) or len(v) != 4:
+        return None
+    x, y, w, h = (min(1.0, max(0.0, _num(a))) for a in v)
+    w, h = min(w, 1 - x), min(h, 1 - y)
+    return (x, y, w, h) if w >= 0.03 and h >= 0.03 and (w < 0.98 or h < 0.98) else None
+
+
+def report_shots(it):
+    """보고 항목의 캡처 → [(파일 이름, 설명, focus)]. images 칸은 문자열 또는 {file, caption, focus}."""
+    out = []
+    for p in (it.get('images') if isinstance(it.get('images'), list) else [])[:8]:
+        if isinstance(p, dict):
+            out.append((str(p.get('file') or p.get('path') or ''), one_line(str(p.get('caption') or ''), 120), norm_focus(p.get('focus'))))
+        elif p:
+            out.append((str(p), '', None))
+    return [s for s in out if s[0]]
+
+
+def norm_chart(c):
+    if not isinstance(c, dict):
+        return None
+    labels = [one_line(str(x), 24) for x in (c.get('labels') if isinstance(c.get('labels'), list) else [])][:12]
+    series = []
+    for s in (c.get('series') if isinstance(c.get('series'), list) else [])[:4]:
+        if isinstance(s, dict) and isinstance(s.get('values'), list):
+            vals = [_num(v) for v in s['values'][:len(labels)]]
+            vals += [0.0] * (len(labels) - len(vals))
+            series.append({'name': one_line(str(s.get('name') or ''), 24), 'values': vals})
+    typ = c.get('type') if c.get('type') in ('bar', 'line', 'pie') else 'bar'
+    if typ == 'pie':
+        series = [{'name': s['name'], 'values': [max(0.0, v) for v in s['values']]} for s in series[:1]]
+    if not labels or not series or not any(v for s in series for v in s['values']):
+        return None
+    return {'title': one_line(str(c.get('title') or ''), 60), 'type': typ, 'unit': one_line(str(c.get('unit') or ''), 12),
+            'labels': labels, 'series': series}
+
+
+def report_extras(rep):
+    """(핵심 줄, 핵심 수치, 그래프) — 없으면 빈 목록."""
+    hl = [one_line(str(x), 200) for x in (rep.get('highlights') if isinstance(rep.get('highlights'), list) else []) if x][:5]
+    ms = []
+    for x in (rep.get('metrics') if isinstance(rep.get('metrics'), list) else [])[:6]:
+        if isinstance(x, dict) and (x.get('label') or x.get('value')):
+            ms.append({'label': one_line(str(x.get('label') or ''), 30), 'value': one_line(str(x.get('value') if x.get('value') is not None else ''), 16),
+                       'note': one_line(str(x.get('note') or ''), 40), 'tone': x.get('tone') if x.get('tone') in ('good', 'bad') else 'neutral'})
+    ch = [c for c in (norm_chart(x) for x in (rep.get('charts') if isinstance(rep.get('charts'), list) else [])[:4]) if c]
+    return hl, ms, ch
+
+
+# ── 그래프: 한 번 배치(chart_layout)해서 PC 캔버스·HTML(SVG)·휴대폰(SVG)이 같은 그림을 그린다 ──
+def _tw(s, size):
+    """대략적인 글자 너비 (px). 한중일 글자는 넓게."""
+    return sum(size * (1.0 if ord(ch) > 0x2e80 else 0.58) for ch in s)
+
+
+def _tfit(s, size, w):
+    if _tw(s, size) <= w:
+        return s
+    while s and _tw(s + '…', size) > w:
+        s = s[:-1]
+    return s + '…' if s else ''
+
+
+def _nice(v):
+    if v <= 0:
+        return 1
+    e = 10 ** math.floor(math.log10(v))
+    f = v / e
+    return (1 if f <= 1 else 2 if f <= 2 else 5 if f <= 5 else 10) * e
+
+
+def _fmtn(v):
+    if abs(v) >= 100 or v == int(v):
+        return f'{v:,.0f}'
+    return f'{v:.1f}' if abs(v) >= 10 else f'{v:.2f}'.rstrip('0').rstrip('.')
+
+
+def chart_layout(ch, w, h, fg, dim, grid, s=1.0):
+    """그래프를 그릴 조각들: ('rect', x0, y0, x1, y1, 색) · ('line', [x, y, …], 색, 굵기) · ('text', x, y, 글, 크기, 색, start|middle|end, 굵게)
+    · ('wedge', cx, cy, r, 시작각, 각도, 색) · ('dot', cx, cy, r, 색). 글자는 y가 가운데."""
+    P, pad = [], 12 * s
+    y = pad
+    title = ch['title'] + (f' ({ch["unit"]})' if ch['unit'] else '')
+    if title:
+        P.append(('text', pad, y + 8 * s, _tfit(title, 15 * s, w - 2 * pad), 15 * s, fg, 'start', True))
+        y += 26 * s
+    series, labels = ch['series'], ch['labels']
+    if len(series) > 1:
+        x = pad
+        for i, sr in enumerate(series):
+            col = CHART_COLS[i % len(CHART_COLS)]
+            P.append(('rect', x, y + 3 * s, x + 10 * s, y + 13 * s, col))
+            P.append(('text', x + 14 * s, y + 8 * s, sr['name'], 11 * s, dim, 'start', False))
+            x += 30 * s + _tw(sr['name'], 11 * s)
+        y += 20 * s
+    if ch['type'] == 'pie':
+        vals = series[0]['values']
+        tot = sum(vals) or 1
+        r = max(10, min((h - y - pad) / 2, (w - 2 * pad) * 0.26))
+        cx, cy = pad + r + 4 * s, y + (h - y - pad) / 2
+        a = 90.0
+        lx, ly = cx + r + 24 * s, cy - len(vals) * 10 * s
+        for i, v in enumerate(vals):
+            col = CHART_COLS[i % len(CHART_COLS)]
+            ext = -min(359.99, 360 * v / tot)
+            if v > 0:
+                P.append(('wedge', cx, cy, r, a, ext, col))
+            a += ext
+            P.append(('rect', lx, ly + i * 20 * s - 5 * s, lx + 10 * s, ly + i * 20 * s + 5 * s, col))
+            P.append(('text', lx + 16 * s, ly + i * 20 * s, _tfit(f'{labels[i]}  {v / tot * 100:.0f}%', 11 * s, w - lx - 20 * s),
+                      11 * s, fg, 'start', False))
+        return P
+    allv = [v for sr in series for v in sr['values']]
+    vmax = _nice(max(allv + [0]))
+    vmin = -_nice(-min(allv)) if min(allv) < 0 else 0
+    left = pad + max(_tw(_fmtn(vmax), 10 * s), _tw(_fmtn(vmin), 10 * s)) + 8 * s
+    top, bottom, right = y + 8 * s, h - pad - 18 * s, w - pad
+    yv = lambda v: bottom - (v - vmin) / ((vmax - vmin) or 1) * (bottom - top)
+    for k in range(5):
+        v = vmin + (vmax - vmin) * k / 4
+        P.append(('line', [left, yv(v), right, yv(v)], grid, 1))
+        P.append(('text', left - 6 * s, yv(v), _fmtn(v), 10 * s, dim, 'end', False))
+    n = len(labels)
+    slot = (right - left) / n
+    for i, lab in enumerate(labels):
+        P.append(('text', left + slot * (i + 0.5), bottom + 11 * s, _tfit(lab, 10 * s, slot - 4), 10 * s, dim, 'middle', False))
+    if ch['type'] == 'bar':
+        bw = slot * 0.7 / len(series)
+        show = n * len(series) <= 16 and bw >= 18 * s
+        for k, sr in enumerate(series):
+            col = CHART_COLS[k % len(CHART_COLS)]
+            for i, v in enumerate(sr['values']):
+                x0 = left + slot * i + slot * 0.15 + bw * k
+                P.append(('rect', x0, min(yv(v), yv(0)), x0 + bw - 2 * s, max(yv(v), yv(0)), col))
+                if show:
+                    P.append(('text', x0 + bw / 2 - s, yv(v) - 8 * s if v >= 0 else yv(v) + 8 * s, _fmtn(v), 10 * s, fg, 'middle', True))
+    else:
+        for k, sr in enumerate(series):
+            col = CHART_COLS[k % len(CHART_COLS)]
+            pts = []
+            for i, v in enumerate(sr['values']):
+                pts += [left + slot * (i + 0.5), yv(v)]
+            if len(pts) >= 4:
+                P.append(('line', pts, col, 2.5 * s))
+            for i in range(0, len(pts), 2):
+                P.append(('dot', pts[i], pts[i + 1], 3.5 * s, col))
+            if n <= 8:
+                for i, v in enumerate(sr['values']):
+                    P.append(('text', left + slot * (i + 0.5), yv(v) - 11 * s, _fmtn(v), 10 * s, col, 'middle', True))
+    if vmin < 0:
+        P.append(('line', [left, yv(0), right, yv(0)], dim, 1.5))
+    return P
+
+
+def draw_chart(c, x0, y0, prims, family, bg, tags=()):
+    """chart_layout 조각을 Tk 캔버스에 그린다."""
+    anc = {'start': 'w', 'middle': 'center', 'end': 'e'}
+    for p in prims:
+        k = p[0]
+        if k == 'rect':
+            c.create_rectangle(x0 + p[1], y0 + p[2], x0 + p[3], y0 + p[4], fill=p[5], outline='', tags=tags)
+        elif k == 'line':
+            c.create_line(*[v + (x0 if i % 2 == 0 else y0) for i, v in enumerate(p[1])], fill=p[2], width=p[3], tags=tags)
+        elif k == 'text':
+            c.create_text(x0 + p[1], y0 + p[2], text=p[3], fill=p[5], anchor=anc[p[6]], tags=tags,
+                          font=(family, -max(7, int(p[4])), 'bold' if p[7] else 'normal'))
+        elif k == 'wedge':
+            cx, cy, r = x0 + p[1], y0 + p[2], p[3]
+            c.create_arc(cx - r, cy - r, cx + r, cy + r, start=p[4], extent=p[5], fill=p[6], outline=bg, width=2, style='pieslice',
+                         tags=tags)
+        elif k == 'dot':
+            c.create_oval(x0 + p[1] - p[3], y0 + p[2] - p[3], x0 + p[1] + p[3], y0 + p[2] + p[3], fill=p[4], outline=bg, tags=tags)
+
+
+def chart_svg(prims, w, h, family='Pretendard, Malgun Gothic, sans-serif'):
+    """chart_layout 조각 → SVG 글 (회의 자료 HTML용). 글자는 모두 이스케이프한다."""
+    import html as H
+    out = [f'<svg viewBox="0 0 {w:.0f} {h:.0f}" width="{w:.0f}" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg" '
+           f'font-family="{H.escape(family)}">']
+    for p in prims:
+        k = p[0]
+        if k == 'rect':
+            out.append(f'<rect x="{p[1]:.1f}" y="{p[2]:.1f}" width="{max(0, p[3] - p[1]):.1f}" height="{max(0, p[4] - p[2]):.1f}" fill="{p[5]}" rx="2"/>')
+        elif k == 'line':
+            pts = ' '.join(f'{p[1][i]:.1f},{p[1][i + 1]:.1f}' for i in range(0, len(p[1]), 2))
+            out.append(f'<polyline points="{pts}" fill="none" stroke="{p[2]}" stroke-width="{p[3]}" stroke-linejoin="round"/>')
+        elif k == 'text':
+            fw = ' font-weight="700"' if p[7] else ''
+            out.append(f'<text x="{p[1]:.1f}" y="{p[2]:.1f}" font-size="{p[4]:.1f}" fill="{p[5]}" text-anchor="{p[6]}" '
+                       f'dominant-baseline="middle"{fw}>{H.escape(p[3])}</text>')
+        elif k == 'wedge':
+            out.append(f'<path d="{wedge_path(*p[1:6])}" fill="{p[6]}" stroke="#ffffff" stroke-width="2"/>')
+        elif k == 'dot':
+            out.append(f'<circle cx="{p[1]:.1f}" cy="{p[2]:.1f}" r="{p[3]:.1f}" fill="{p[4]}"/>')
+    out.append('</svg>')
+    return ''.join(out)
+
+
+def wedge_path(cx, cy, r, a0, ext):
+    """Tk 방식 각도(3시 방향에서 반시계, ext<0이면 시계 방향) → SVG 부채꼴 경로."""
+    a1 = a0 + ext
+    x1, y1 = cx + r * math.cos(math.radians(a0)), cy - r * math.sin(math.radians(a0))
+    x2, y2 = cx + r * math.cos(math.radians(a1)), cy - r * math.sin(math.radians(a1))
+    return f'M{cx:.1f},{cy:.1f} L{x1:.1f},{y1:.1f} A{r:.1f},{r:.1f} 0 {1 if abs(ext) > 180 else 0} {1 if ext < 0 else 0} {x2:.1f},{y2:.1f} Z'
+
+
+def png_size(path):
+    """PNG·GIF 그림 크기 (읽지 못하면 None)."""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(26)
+        if head[:8] == b'\x89PNG\r\n\x1a\n':
+            return int.from_bytes(head[16:20], 'big'), int.from_bytes(head[20:24], 'big')
+        if head[:3] == b'GIF':
+            return int.from_bytes(head[6:8], 'little'), int.from_bytes(head[8:10], 'little')
+    except OSError:
+        pass
+    return None
+
+
+def photo_crop(path, focus, width, height, cache):
+    """그림의 focus 부분만 잘라 width×height 안에 맞춰 키운 PhotoImage (중요한 부분 확대). 못 읽으면 None."""
+    try:
+        key = ('crop', path, os.path.getmtime(path), focus, width, height)
+    except OSError:
+        return None
+    if key in cache:
+        return cache[key]
+    try:
+        full = tk.PhotoImage(file=path)
+    except tk.TclError:
+        return None
+    iw, ih = full.width(), full.height()
+    x, y, w, h = focus
+    x0, y0 = int(x * iw), int(y * ih)
+    x1, y1 = max(x0 + 2, int((x + w) * iw)), max(y0 + 2, int((y + h) * ih))
+    part = tk.PhotoImage()
+    part.tk.call(part, 'copy', full, '-from', x0, y0, x1, y1)
+    cache[key] = _photo_scale(part, width, height, up=4)
+    return cache[key]
+
+
+def _photo_scale(img, width, height=None, up=3):
+    """정수배 줄임만 되므로 a/b (a=1~up) 중 칸에 들어가는 가장 큰 배율로 맞춘다."""
+    iw, ih = img.width(), img.height()
+    best = (0, 1, 1)
+    for a in range(1, up + 1):
+        if a > 1 and iw * ih * a * a > 8_000_000:  # 큰 그림을 키우면 메모리를 많이 잡는다
+            break
+        b = max(1, -(-iw * a // width), -(-ih * a // height) if height else 1)
+        if iw * a / b > best[0] and (a == 1 or b > a or a / b > 1):
+            best = (iw * a / b, a, b)
+    _w, a, b = best
+    if a > 1:
+        img = img.zoom(a, a)
+    return img.subsample(b, b) if b > 1 else img
+
+
 def photo_fit(path, width, height=None, cache=None):
     """그림을 width×height 안에 들도록 정수배로 줄이거나(작으면 3배까지) 키운 PhotoImage. 못 읽으면 None."""
     try:
@@ -3291,6 +3653,58 @@ def photo_fit(path, width, height=None, cache=None):
     if cache is not None:
         cache[key] = img
     return img
+
+
+STYLE_NOTE = {
+    'brief': T('요청별 결과와 캡처만 정리해요. 세션이 쓰는 토큰이 적어요.'),
+    'rich': T('핵심 줄·핵심 수치·그래프 데이터를 더 적고, 찍은 캡처를 직접 열어 중요한 부분을 표시해요. '
+              '회사 보고처럼 보기 쉽지만 세션이 토큰을 더 써요 (캡처 한 장을 보는 데 수천 토큰).'),
+}
+
+
+def draw_metrics(c, x0, y0, x1, y1, ms, family, s, tags=()):
+    """핵심 수치판: 칸마다 이름·값(좋음 초록, 나쁨 빨강)·덧말."""
+    n = len(ms)
+    if not n:
+        return
+    cols = 3 if n > 4 else 2 if n > 1 else 1
+    rows = -(-n // cols)
+    gw, gh = (x1 - x0) / cols, (y1 - y0) / rows
+    for i, x in enumerate(ms):
+        cx0, cy0 = x0 + (i % cols) * gw, y0 + (i // cols) * gh
+        round_rect(c, cx0 + 3, cy0 + 3, cx0 + gw - 3, cy0 + gh - 3, 8 * s, fill=CARD, outline=EDGE, tags=tags)
+        col = TONE_COL.get(x['tone'], FG)
+        c.create_text(cx0 + 12 * s, cy0 + gh * 0.28, text=_tfit(x['label'], 11 * s, gw - 24 * s), anchor='w', fill=DIM,
+                      font=(family, -int(11 * s)), tags=tags)
+        c.create_text(cx0 + 12 * s, cy0 + gh * 0.58, text=_tfit(x['value'], 20 * s, gw - 24 * s), anchor='w', fill=col,
+                      font=(family, -int(min(22 * s, gh * 0.32)), 'bold'), tags=tags)
+        if x['note']:
+            c.create_text(cx0 + 12 * s, cy0 + gh * 0.84, text=_tfit(x['note'], 10 * s, gw - 24 * s), anchor='w', fill=col if col != FG else DIM,
+                          font=(family, -int(10 * s)), tags=tags)
+
+
+class ChartWin:
+    """그래프 크게 보기 (창 크기에 맞춰 다시 그린다, Esc로 닫기)."""
+
+    def __init__(self, app, ch):
+        Z = app.Z
+        w = self.win = tk.Toplevel(app.root)
+        w.title((ch['title'] or T('그래프')) + ' · Claude Office')
+        w.configure(bg=CARD)
+        w.transient(app.root)
+        w.geometry(f'{int(900 * Z)}x{int(540 * Z)}')
+        c = tk.Canvas(w, bg=CARD, highlightthickness=0)
+        c.pack(fill='both', expand=True, padx=int(12 * Z), pady=int(12 * Z))
+        fam = app.fonts['body'].actual('family')
+
+        def draw(_e=None):
+            c.delete('all')
+            W, H = max(200, c.winfo_width()), max(150, c.winfo_height())
+            draw_chart(c, 0, 0, chart_layout(ch, W, H, FG, DIM, EDGE, s=Z * 1.4), fam, CARD)
+
+        c.bind('<Configure>', draw)
+        w.bind('<Escape>', lambda e: w.destroy())
+        w.after(30, lambda: (w.lift(), w.focus_force()))
 
 
 class ImageViewer:
@@ -3423,13 +3837,23 @@ class MeetingWin:
         for k in ('<space>', '<Return>', '<Right>'):
             self.scene.bind(k, lambda e: self.next())
         self.scene.bind('<Left>', lambda e: self.prev())
+        # 문서 크게 보기: 회의 장면을 접고 회의 준비·회의록이 창 전체를 쓴다 (그림·그래프도 크게)
+        self.big = bool(app.cfg.get('meet_docs_big'))
+        self.docbar = tk.Frame(w, bg=BG, padx=14)
+        self.docbar.pack(fill='x', pady=(8, 0))
+        self.big_btn = app._btn(self.docbar, '', self.toggle_big, bg=CARD, fg=ACC_TEXT, hover=HOVER)
+        self.big_btn.configure(highlightbackground=ACCENT)
+        self.big_btn.pack(side='right')
+        self.big_note = tk.Label(self.docbar, text='', font=F['small'], bg=BG, fg=DIM, anchor='w')
+        self.big_note.pack(side='left')
         holder = tk.Frame(w, bg=BG, padx=14)
-        holder.pack(fill='both', expand=True, pady=(10, 12))
+        holder.pack(fill='both', expand=True, pady=(8, 12))
         self.cv, self.inner = scroll_frame(holder, BG)
         w.bind('<MouseWheel>', lambda e: self.cv.yview_scroll(int(-e.delta / 120), 'units'))
         self.cv.bind('<Configure>', lambda e: self._wrap(e.width), add='+')
         self.pick = set(app.cfg.get('meet_pick') or [])
         self.turns = app.cfg.get('meet_turns') if app.cfg.get('meet_turns') in MEET_TURNS else 3
+        self.style = app.cfg.get('meet_style') if app.cfg.get('meet_style') in MEET_STYLES else 'brief'
         self.faces, self.thumbs, self.sprites, self.wraps = {}, {}, {}, []
         m = self.meeting()
         self.presented = set((m or {}).get('presented') or [])
@@ -3445,9 +3869,25 @@ class MeetingWin:
         self.speaker, self.pages, self.pi = None, [], 0
         self.ty = {'text': '', 'n': 0, 'job': None}
         self.ph = 0
+        self._apply_big()
         self.refresh()
         self._loop()
         self._anim_tick()
+
+    def toggle_big(self):
+        self.big = self.app.cfg['meet_docs_big'] = not self.big
+        self.app.save_cfg()
+        self._apply_big()
+        self.min_sig = self.setup_sig = None
+        self.refresh()
+
+    def _apply_big(self):
+        if self.big:
+            self.scene.pack_forget()
+        elif not self.scene.winfo_ismapped():
+            self.scene.pack(fill='x', before=self.docbar)
+        self.big_btn.configure(text=('▣  ' + T('회의 장면 보기')) if self.big else ('⤢  ' + T('문서 크게 보기')))
+        self.big_note.configure(text=T('회의 장면을 접고 문서를 크게 보는 중이에요') if self.big else '')
 
     # ── 상태 ──
     def meeting(self):
@@ -3698,9 +4138,27 @@ class MeetingWin:
         x0, y0, x1, y1 = g['scr']
         page = self.pages[self.pi] if self.pages else {}
         imgs = page.get('images') or []
-        img = self.thumb(imgs[0], int(x1 - x0 - 12 * Z), int(y1 - y0 - 12 * Z)) if imgs else None
+        vis = page.get('visual')
+        img = self.thumb(imgs[0], int(x1 - x0 - 12 * Z), int(y1 - y0 - 12 * Z)) if imgs and not vis else None
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        if img:
+        hand = lambda: (c.tag_bind('scr', '<Enter>', lambda e: c.configure(cursor='hand2')),
+                        c.tag_bind('scr', '<Leave>', lambda e: c.configure(cursor='')))
+        if vis and vis[0] == 'chart':
+            fam = F['body'].actual('family')
+            draw_chart(c, x0 + 6 * Z, y0 + 4 * Z, chart_layout(vis[1], x1 - x0 - 12 * Z, y1 - y0 - 8 * Z, FG, DIM, EDGE, s=Z * 0.78),
+                       fam, MW['screen'], tags='scr')
+            c.tag_bind('scr', '<Button-1>', lambda e, ch=vis[1]: ChartWin(self.app, ch))
+            hand()
+        elif vis and vis[0] == 'metrics':
+            draw_metrics(c, x0 + 8 * Z, y0 + 8 * Z, x1 - 8 * Z, y1 - 8 * Z, vis[1], F['body'].actual('family'), Z * 0.85, tags='scr')
+        elif vis and vis[0] == 'crop':
+            crop = photo_crop(vis[1], vis[2], int(x1 - x0 - 12 * Z), int(y1 - y0 - 12 * Z), self.thumbs)
+            if crop:
+                c.create_image(cx, cy, image=crop, tags='scr')
+            c.create_text(x0 + 6 * Z, y1 - 4 * Z, text='🔍 ' + T('확대'), anchor='sw', font=F['tiny'], fill=ACCENT, tags='scr')
+            c.tag_bind('scr', '<Button-1>', lambda e, p=vis[1]: ImageViewer(self.app, [p], 0))
+            hand()
+        elif img:
             c.create_image(cx, cy, image=img, tags='scr')
             if len(imgs) > 1:
                 c.create_text(x1 - 6 * Z, y1 - 4 * Z, text=f'+{len(imgs) - 1}', anchor='se', font=F['tiny'], fill=ACCENT, tags='scr')
@@ -3783,11 +4241,18 @@ class MeetingWin:
             self.draw_screen()
 
     def build_pages(self, r):
+        """발표 장들: 대사(세 줄씩) + 스크린에 띄울 것(캡처, 또는 visual = 핵심 수치판·그래프·캡처의 확대 부분)."""
         rep, F = r['report'], self.app.fonts
         segs = []
         head = '\n'.join(x for x in (one_line(rep.get('title') or ''), clean(rep.get('summary') or '', 900)) if x)
         if head:
-            segs.append((head, []))
+            segs.append((head, [], None))
+        hl, ms, chs = report_extras(rep)
+        if hl or ms:
+            text = '\n'.join('• ' + x for x in hl) if hl else '\n'.join(f'{x["label"]} {x["value"]}' for x in ms)
+            segs.append((T('핵심') + '\n' + text, [], ('metrics', ms) if ms else None))
+        for ch in chs:
+            segs.append((T('그래프 · {0}').format(ch['title'] or T('수치')), [], ('chart', ch)))
         m = self.meeting()
         for it in rep.get('items') or []:
             if not isinstance(it, dict):
@@ -3796,15 +4261,21 @@ class MeetingWin:
             text = f'[{st}] ' + one_line(it.get('request') or '', 160)
             if it.get('result'):
                 text += '\n' + clean(it['result'], 1200)
-            segs.append((text, self.images(m, it) if m else []))
+            shots = self.shots(m, it) if m else []
+            segs.append((text, [p for p, _c, _f in shots], None))
+            for p, cap, foc in shots:  # 중요한 부분은 확대해서 한 장 더
+                if foc:
+                    segs.append(('🔍 ' + (cap or T('중요한 부분을 확대했어요')), [p], ('crop', p, foc)))
+                elif cap:
+                    segs.append(('🖼 ' + cap, [p], None))
         if rep.get('next'):
-            segs.append((T('다음 할 일 · ') + clean(rep['next'], 600), []))
+            segs.append((T('다음 할 일 · ') + clean(rep['next'], 600), [], None))
         px = getattr(self, 'text_px', 600)
         pages = []
-        for text, imgs in segs:
+        for text, imgs, vis in segs:
             lines = wrap_text(text, F['body'], px)
             for k in range(0, len(lines), 3):  # 대사 창 한 번에 세 줄
-                pages.append({'text': '\n'.join(lines[k:k + 3]), 'images': imgs})
+                pages.append({'text': '\n'.join(lines[k:k + 3]), 'images': imgs, 'visual': vis})
         return pages or [{'text': T('(빈 보고서)'), 'images': []}]
 
     def present(self, sid, user=False):
@@ -3824,8 +4295,8 @@ class MeetingWin:
         if hasattr(self, 'pg_id'):
             self.scene.itemconfig(self.pg_id, text=f'{self.pi + 1}/{len(self.pages)}' if len(self.pages) > 1 else '')
         self.type_out(page['text'])
-        prev = self.pages[self.pi - 1]['images'] if self.pi else None
-        self.draw_screen(wipe=page['images'] != prev)
+        prev = self.pages[self.pi - 1] if self.pi else {}
+        self.draw_screen(wipe=(page['images'], page.get('visual')) != (prev.get('images'), prev.get('visual')))
 
     def type_out(self, text):
         """대사를 한 글자씩. 문장 끝·쉼표에서 잠깐 쉰다. 움직임을 끄면 한 번에."""
@@ -3943,6 +4414,17 @@ class MeetingWin:
         app._btn(row, T('회의 시작'), self.start, bg=ACCENT, fg='#ffffff', hover=ACC_DARK, font='menu').pack(side='right')
         if m:
             app._btn(row, T('회의 끝내기'), self.end).pack(side='right', padx=(0, 8))
+        row = tk.Frame(f.body, bg=CARD)
+        row.pack(fill='x', pady=(10, 0))
+        tk.Label(row, text=T('보고 방식'), font=F['h2'], bg=CARD, fg=FG).pack(side='left', padx=(0, 12))
+        self.style_chips = {}
+        for k, label in (('brief', T('간단 · 토큰 절약')), ('rich', T('상세 · 핵심 수치·그래프·캡처 확대'))):
+            b = self._chip(row, label, k == self.style, lambda k=k: self._set_style(k))
+            b.pack(side='left', padx=(0, 6))
+            self.style_chips[k] = b
+        self.style_note = tk.Label(f.body, text=STYLE_NOTE[self.style], font=F['small'], bg=CARD, fg=TEXT2, anchor='w', justify='left')
+        self.style_note.pack(fill='x', pady=(6, 0))
+        self.wraps.append(self.style_note)
         l = tk.Label(f.body, text=T('회의를 시작하면 고른 세션마다 최근 N턴의 요청 목록과 보고 지시가 가요. 바쁜 세션은 하던 일을 마친 뒤 보고해요.'),
                      font=F['small'], bg=CARD, fg=DIM, anchor='w', justify='left')
         l.pack(fill='x', pady=(10, 4))
@@ -3986,6 +4468,12 @@ class MeetingWin:
             self._chip_style(b, sid in pick)
         self.setup_sig = None
         self.refresh()
+
+    def _set_style(self, k):
+        self.style = self.app.cfg['meet_style'] = k
+        for key, b in self.style_chips.items():
+            self._chip_style(b, key == k)
+        self.style_note.configure(text=STYLE_NOTE[k])
 
     def _set_turns(self, n):
         self.turns = self.app.cfg['meet_turns'] = n
@@ -4059,6 +4547,7 @@ class MeetingWin:
                          justify='left', padx=12, pady=8)
             l.pack(fill='x', pady=(10, 0))
             self.wraps.append(l)
+        self._extras(card, rep)
         for it in (rep.get('items') if isinstance(rep.get('items'), list) else [])[:20]:
             if isinstance(it, dict):
                 self._item(card, m, it)
@@ -4067,6 +4556,42 @@ class MeetingWin:
                          anchor='w', justify='left')
             l.pack(fill='x', pady=(10, 0))
             self.wraps.append(l)
+
+    def _extras(self, card, rep):
+        """상세 보고: 핵심 줄, 핵심 수치 칸, 그래프 (누르면 크게)."""
+        app, F, Z = self.app, self.app.fonts, self.app.Z
+        hl, ms, chs = report_extras(rep)
+        if hl:
+            box = tk.Frame(card, bg=MINT, padx=12, pady=8)
+            box.pack(fill='x', pady=(10, 0))
+            tk.Label(box, text=T('핵심'), font=F['tiny'], bg=ACCENT, fg='#ffffff', padx=8).pack(anchor='w', pady=(0, 4))
+            for x in hl:
+                l = tk.Label(box, text='✔  ' + x, font=F['bodyb'], bg=MINT, fg=FG, anchor='w', justify='left')
+                l.pack(fill='x', pady=1)
+                self.wraps.append(l)
+        if ms:
+            grid = tk.Frame(card, bg=CARD2)
+            grid.pack(fill='x', pady=(10, 0))
+            cols = 3 if len(ms) > 4 or self.big else 2 if len(ms) > 1 else 1
+            cols = min(cols, len(ms)) if len(ms) < 3 else cols
+            for i, x in enumerate(ms):
+                tile = tk.Frame(grid, bg=CARD, padx=14, pady=10, highlightthickness=1, highlightbackground=EDGE)
+                tile.grid(row=i // cols, column=i % cols, sticky='nsew', padx=(0, 8), pady=(0, 8))
+                tk.Label(tile, text=x['label'], font=F['small'], bg=CARD, fg=DIM, anchor='w').pack(fill='x')
+                tk.Label(tile, text=x['value'], font=F['num'], bg=CARD, fg=TONE_COL.get(x['tone'], FG), anchor='w').pack(fill='x')
+                if x['note']:
+                    tk.Label(tile, text=x['note'], font=F['tiny'], bg=CARD, fg=TONE_COL.get(x['tone'], DIM), anchor='w').pack(fill='x')
+            for col in range(cols):
+                grid.columnconfigure(col, weight=1, uniform='mt')
+        if chs:
+            W = max(360, min(int((980 if self.big else 640) * Z), self.cv.winfo_width() - int(90 * Z)))
+            H = int((330 if self.big else 250) * Z)
+            fam = F['body'].actual('family')
+            for ch in chs:
+                cv = tk.Canvas(card, width=W, height=H, bg=CARD, highlightthickness=1, highlightbackground=EDGE, cursor='hand2')
+                cv.pack(anchor='w', pady=(10, 0))
+                draw_chart(cv, 0, 0, chart_layout(ch, W, H, FG, DIM, EDGE, s=Z * (1.05 if self.big else 0.9)), fam, CARD)
+                cv.bind('<Button-1>', lambda e, ch=ch: ChartWin(app, ch))
 
     def _item(self, card, m, it):
         F, Z = self.app.fonts, self.app.Z
@@ -4091,14 +4616,30 @@ class MeetingWin:
             self.wraps.append(l)
         shots = tk.Frame(f, bg=CARD2)
         shots.pack(fill='x', pady=(6, 0))
-        ps = self.images(m, it)[:6]
-        for i, p in enumerate(ps):
-            img = self.thumb(p, int(260 * Z))
+        sh = self.shots(m, it)[:6]
+        ps = [p for p, _c, _f in sh]
+        tw = int((440 if self.big else 260) * Z)
+        for i, (p, cap, foc) in enumerate(sh):
+            img = self.thumb(p, tw)
             if not img:
                 continue
-            b = tk.Label(shots, image=img, bg=CARD2, cursor='hand2', highlightthickness=1, highlightbackground=EDGE)
-            b.pack(side='left', padx=(0, 8))
+            col = tk.Frame(shots, bg=CARD2)
+            col.pack(side='left', anchor='n', padx=(0, 10), pady=(0, 6))
+            pics = tk.Frame(col, bg=CARD2)
+            pics.pack(anchor='w')
+            b = tk.Label(pics, image=img, bg=CARD2, cursor='hand2', highlightthickness=1, highlightbackground=EDGE)
+            b.pack(side='left')
             b.bind('<Button-1>', lambda e, i=i: ImageViewer(self.app, ps, i))
+            if foc:  # 중요한 부분 확대
+                crop = photo_crop(p, foc, tw, img.height(), self.thumbs)
+                if crop:
+                    z = tk.Label(pics, image=crop, bg=CARD2, cursor='hand2', highlightthickness=2, highlightbackground=ACCENT)
+                    z.pack(side='left', padx=(6, 0))
+                    z.bind('<Button-1>', lambda e, i=i: ImageViewer(self.app, ps, i))
+            if cap or foc:
+                l = tk.Label(col, text=('🔍 ' if foc else '') + (cap or T('중요한 부분을 확대했어요')), font=F['small'], bg=CARD2,
+                             fg=TEXT2, anchor='w', justify='left', wraplength=tw * (2 if foc else 1))
+                l.pack(anchor='w', pady=(4, 0))
 
     def _bind_wheel(self, root):
         stack = [root]
@@ -4112,14 +4653,17 @@ class MeetingWin:
             if l.winfo_exists():
                 l.configure(wraplength=max(240, width - 100))
 
-    def images(self, m, it):
+    def shots(self, m, it):
+        """[(캡처 경로, 설명, focus)] — 있는 PNG·GIF만."""
         out = []
-        for p in it.get('images') or []:
-            p = str(p)
+        for p, cap, foc in report_shots(it):
             p = p if os.path.isabs(p) else os.path.join(self.folder(m), p)
             if p.lower().endswith(('.png', '.gif')) and os.path.isfile(p):
-                out.append(p)
+                out.append((p, cap, foc))
         return out
+
+    def images(self, m, it):
+        return [p for p, _c, _f in self.shots(m, it)]
 
     # ── 조작 ──
     def start(self):
@@ -4130,7 +4674,7 @@ class MeetingWin:
         if read_json(MEET_FILE) and not tkmsg.askyesno(T('회의실'), T('지금 회의를 끝내고 새 회의를 시작할까요?\n(지난 보고서는 폴더에 남아요)'),
                                                         parent=self.win):
             return
-        meeting_start(app, self.pick, self.turns)
+        meeting_start(app, self.pick, self.turns, self.style)
         self.presented, self.speaker, self.pages, self.known = set(), None, [], set()
         self.f_setup.toggle(False)  # 준비 칸은 접고 회의 장면에 집중
         self.refresh()
@@ -4158,7 +4702,13 @@ class MeetingWin:
                '.sum{background:#f1f5f4;border-radius:10px;padding:10px 14px;margin:12px 0}.it{border-top:1px solid #e2e8ee;'
                'padding-top:12px;margin-top:12px}.st{display:inline-block;color:#fff;border-radius:6px;padding:1px 8px;font-size:12px;'
                'margin-right:8px}.files{color:#6b7580;font-size:13px}img{max-width:420px;border:1px solid #e2e8ee;'
-               'border-radius:8px;margin:8px 8px 0 0}</style>',
+               'border-radius:8px;margin:8px 8px 0 0}.hl{background:#e7f6ef;border-radius:10px;padding:10px 16px;margin:12px 0}'
+               '.hl li{font-weight:700;margin:3px 0}.mt{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;'
+               'margin:12px 0}.mt div{border:1px solid #e2e8ee;border-radius:10px;padding:10px 14px}.mt small{color:#6b7580;display:block}'
+               '.mt b{font-size:24px;display:block}.chart{border:1px solid #e2e8ee;border-radius:10px;padding:6px;margin:10px 0;'
+               'max-width:680px}.shot{display:inline-block;vertical-align:top;margin:8px 12px 0 0}.shot .cap{color:#4a5562;font-size:13px;'
+               'max-width:420px}.crop{width:300px;border:2px solid #2fb985;border-radius:8px;background-repeat:no-repeat;'
+               'display:inline-block;margin:8px 8px 0 0}</style>',
                f'<h1>{e(T("회의 보고서"))}</h1><div class="sub">{e(when)} · {e(T("최근 {0}턴").format(m.get("turns")))}</div>']
         for sid in m['members']:
             r = self.report(m, sid) or {}
@@ -4170,6 +4720,15 @@ class MeetingWin:
                 out.append(f'<div class="ttl">{e(str(r["title"]))}</div>')
             if r.get('summary'):
                 out.append(f'<div class="sum">{e(str(r["summary"]))}</div>')
+            hl, ms, chs = report_extras(r)
+            if hl:
+                out.append('<ul class="hl">' + ''.join(f'<li>{e(x)}</li>' for x in hl) + '</ul>')
+            if ms:
+                out.append('<div class="mt">' + ''.join(
+                    f'<div><small>{e(x["label"])}</small><b style="color:{TONE_COL.get(x["tone"], "#1e2329")}">{e(x["value"])}</b>'
+                    f'<small>{e(x["note"])}</small></div>' for x in ms) + '</div>')
+            for ch in chs:
+                out.append('<div class="chart">' + chart_svg(chart_layout(ch, 660, 300, '#1e2329', '#6b7580', '#e2e8ee'), 660, 300) + '</div>')
             for it in r.get('items') if isinstance(r.get('items'), list) else []:
                 if not isinstance(it, dict):
                     continue
@@ -4178,8 +4737,19 @@ class MeetingWin:
                            f'<b>{e(str(it.get("request") or ""))}</b><p>{e(str(it.get("result") or ""))}</p>')
                 if it.get('files'):
                     out.append(f'<div class="files">{e(", ".join(map(str, it["files"])))}</div>')
-                for p in self.images(m, it):
-                    out.append(f'<a href="file:///{e(p)}"><img src="file:///{e(p)}"></a>')
+                for p, cap, foc in self.shots(m, it):
+                    out.append(f'<div class="shot"><a href="file:///{e(p)}"><img src="file:///{e(p)}"></a>')
+                    size = png_size(p)
+                    if foc and size:  # 중요한 부분 확대: 배경 그림을 그 부분만 보이게 키운다
+                        x, y, w, h = foc
+                        px = x / (1 - w) * 100 if w < 1 else 0
+                        py = y / (1 - h) * 100 if h < 1 else 0
+                        url = 'file:///' + p.replace('\\', '/')
+                        out.append(f'<div class="crop" style="background-image:url(&quot;{e(url)}&quot;);background-size:{100 / w:.2f}% {100 / h:.2f}%;'
+                                   f'background-position:{px:.2f}% {py:.2f}%;aspect-ratio:{w * size[0]:.0f}/{h * size[1]:.0f}"></div>')
+                    if cap:
+                        out.append(f'<div class="cap">{"🔍 " if foc else ""}{e(cap)}</div>')
+                    out.append('</div>')
                 out.append('</div>')
             if r.get('next'):
                 out.append(f'<p class="files">{e(T("다음 할 일 · "))}{e(str(r["next"]))}</p>')
@@ -4692,6 +5262,7 @@ class App:
             self.group = ''
         self.sec_pick = self.cfg.get('secretary') or ''
         self.sec_done = set(self.cfg.get('sec_done') or [])
+        self.sec_sent = dict(self.cfg.get('sec_sent') or {})  # 비서 제안 → 맡긴 세션·시각 (진행 결과를 찾는 데)
         self.sec_sid, self.sec_on, self.sec_box = None, False, None
         self.sec_hits = []          # 비서 말풍선 안 버튼들 (캔버스 좌표, 할 일)
         self.wb_sig = self.secb_sig = None
@@ -4834,7 +5405,7 @@ class App:
             self.cfg.update(geometry=self.root.geometry(), zoom=self.Z, anim=self.anim_on.get(),
                             topmost=self.topmost.get(), panel_w=self.right.winfo_width(), tab=self.tab,
                             desk_order=self.desk_order, avatars=self.avatars, groups=self.groups, group=self.group,
-                            secretary=self.sec_pick, sec_done=sorted(self.sec_done)[-300:], chat_seen=self.chat_seen,
+                            secretary=self.sec_pick, sec_done=sorted(self.sec_done)[-300:], sec_sent=self.sec_sent, chat_seen=self.chat_seen,
                             popup_windows=self.popup.get())
             os.makedirs(CACHE_DIR, exist_ok=True)
             with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
@@ -6710,8 +7281,33 @@ class App:
         except OSError as ex:
             self.toast(T('보내기 실패: {0}').format(ex), warn=True)
             return
+        self.sec_sent[it['_key']] = {'sid': ch['sid'], 'name': ch['name'], 'label': ch['label'], 'ts': time.time(),
+                                     'want': one_line(clean(ch['prompt'], 4000))[:40]}
+        while len(self.sec_sent) > 100:
+            self.sec_sent.pop(next(iter(self.sec_sent)))
         self.sec_mark(it['_key'], True)
         self.toast(T('{0}에 요청했어요 · {1}').format(ch["name"], ch["label"]))
+
+    def sec_result(self, key):
+        """비서 제안으로 세션에 맡긴 일의 결과: {state: sent|working|done|off, sid, name, label, ts, answer} 또는 None.
+        맡긴 세션의 대화 기록에서 그때 보낸 지시문을 찾아 마지막 답변을 붙인다."""
+        d = self.sec_sent.get(key)
+        if not d:
+            return None
+        out = dict(d, state='sent', answer='')
+        with self.mon.lock:
+            s = self.mon.sessions.get(d['sid'])
+            if not s:
+                out['state'] = 'off'
+                return out
+            want = d.get('want') or ''
+            hit = next((e for e in s.qa if e[0] >= d['ts'] - 30 and
+                        (one_line(e[1]).startswith(want) or want.startswith(one_line(e[1])[:40]))), None)
+            mode = s.mode()
+        if hit:
+            out['answer'] = hit[3]
+            out['state'] = 'done' if hit[3] and mode != 'busy' else 'working'
+        return out
 
     def briefing(self):
         """브리핑을 부탁한 뒤 비서가 아직 결과(secretary.json)를 안 썼으면 True."""
