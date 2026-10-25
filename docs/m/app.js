@@ -32,6 +32,9 @@ const STR = {
   qa: ['대화', 'Q&A', '会話', '对话'], log: ['작업 로그', 'Log', '作業ログ', '工作日志'], tasks: ['작업 분배', 'Tasks', 'タスク', '任务'],
   noQa: ['아직 기록이 없어요', 'Nothing yet', 'まだ記録がありません', '还没有记录'],
   all: ['전체', 'All', 'すべて', '全部'], me: ['나', 'Me', '自分', '我'], read: ['읽음', 'Read', '既読', '已读'],
+  members: ['대화상대', 'Members', 'メンバー', '成员'], searchName: ['이름 검색', 'Search names', '名前で検索', '搜索名称'],
+  allRoom: ['전체 채팅방', 'All chats', '全体チャット', '全部聊天'], allRoomSub: ['모든 세션의 대화를 한곳에서', 'Every session in one place', 'すべてのセッションの会話をまとめて', '所有会话的对话'],
+  sessionsN: ['세션 {0}', 'Sessions {0}', 'セッション {0}', '会话 {0}'], noMatch: ['찾는 세션이 없어요', 'No matching session', '該当するセッションがありません', '没有匹配的会话'],
   talkPh: ['메시지 보내기', 'Message', 'メッセージ', '发送消息'], pickRoom: ['위에서 세션을 고르면 명령을 보낼 수 있어요', 'Pick a session above to send a command', '上でセッションを選ぶと指示を送れます', '在上方选择会话即可发送指令'],
   brief: ['브리핑 받기', 'Get briefing', 'ブリーフィング', '获取简报'], briefing: ['브리핑 중…', 'Briefing…', 'ブリーフィング中…', '简报中…'],
   noSec: ['비서 세션이 없어요 · PC에서 만들어 주세요', 'No secretary session · create one on the PC', '秘書セッションがありません · PCで作成してください', '没有秘书会话 · 请在电脑上创建'],
@@ -368,6 +371,7 @@ function render(quiet, dir) {
   if (quiet) { v.querySelectorAll('.card').forEach(c => { c.style.animation = 'none'; }); window.scrollTo(0, keepY); }
   markTab();
   if (sheetFor) refreshSheet();
+  if (!$('#drawer').hidden) { if (tab === 'talk') fillDrawer(); else closeDrawer(); }
 }
 function hero(icon, title, sub) {
   return h('div', { class: 'hero' }, h('div', { class: 'big', text: icon }), h('h2', { text: title }), h('p', { class: 'text2', text: sub }));
@@ -403,13 +407,13 @@ function openSheet(build) {
   sh.hidden = false; back.hidden = false;
   sh.style.transform = ''; sh.style.transition = '';
   back.onclick = closeSheet;
-  document.body.style.overflow = 'hidden';
+  document.documentElement.style.overflow = 'hidden';
   buzz();
 }
 function closeSheet() {
   const sh = $('#sheet');
   sh.classList.add('out');
-  setTimeout(() => { sh.hidden = true; $('#sheet-back').hidden = true; document.body.style.overflow = ''; }, 200);
+  setTimeout(() => { sh.hidden = true; $('#sheet-back').hidden = true; document.documentElement.style.overflow = ''; }, 200);
   sheetFor = null;
 }
 // 시트는 맨 위에서(또는 위쪽 손잡이를 잡고) 아래로 끌면 손가락을 따라 내려가고, 충분히 끌거나 빠르게 튕기면 닫힌다
@@ -537,6 +541,9 @@ function viewTalk(v) {
   } }, h('i'));
   bar.append(h('div', { class: 'talk-cur', onclick: () => toggle.click() }, cur ? curImg : h('span', { class: 'all-mini', text: '#' }),
     h('b', { class: 'ell grow', text: cur ? cur.name : t('all') }), toggle), h('div', { class: 'rooms-wrap' }, rooms));
+  dragScroll(rooms);
+  const on = rooms.querySelector('.room.on');
+  if (on) requestAnimationFrame(() => { rooms.scrollLeft = Math.max(0, on.offsetLeft - rooms.clientWidth / 2 + on.offsetWidth / 2); });
   v.append(bar, h('div', { class: 'chat', id: 'chat' }));
   if (cur) {
     if (!talkComposer || talkComposerRoom !== room) {  // 다시 그려도 쓰던 글이 지워지지 않게 같은 입력칸을 쓴다
@@ -551,6 +558,106 @@ function viewTalk(v) {
   }
   drawChat();
 }
+// 마우스로도 끌어서 넘긴다 (손가락은 브라우저가 직접 굴린다). 끌었으면 손을 뗄 때의 클릭은 무시한다.
+function dragScroll(el) {
+  let d = null;
+  el.addEventListener('dragstart', e => e.preventDefault());  // 그림을 잡아 끄는 기본 동작이 굴리기를 끊지 않게
+  el.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'mouse' || e.button !== 0) return;
+    d = { x: e.clientX, left: el.scrollLeft, moved: false };
+  });
+  el.addEventListener('pointermove', e => {
+    if (!d) return;
+    const dx = e.clientX - d.x;
+    if (!d.moved && Math.abs(dx) > 5) { d.moved = true; el.classList.add('dragging'); el.setPointerCapture(e.pointerId); }
+    if (d.moved) el.scrollLeft = d.left - dx;
+  });
+  const end = () => {
+    if (d && d.moved) el.addEventListener('click', ev => { ev.stopPropagation(); ev.preventDefault(); }, { capture: true, once: true });
+    d = null;
+    el.classList.remove('dragging');
+  };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+}
+
+// 위쪽 막대의 메뉴: 대화상대 전체 목록에서 세션톡 상대를 고른다
+let drawerQ = '';
+function openDrawer() {
+  const dr = $('#drawer'), back = $('#drawer-back');
+  dr.textContent = '';
+  dr.className = '';
+  dr.style.transform = ''; dr.style.transition = '';
+  const close = h('button', { class: 'icon-btn', 'aria-label': 'close', text: '✕', onclick: closeDrawer });
+  const q = h('input', { type: 'search', placeholder: t('searchName'), enterkeyhint: 'search' });
+  q.value = drawerQ;
+  q.addEventListener('input', () => { drawerQ = q.value; fillDrawer(); });
+  dr.append(h('div', { class: 'dr-head' }, h('b', { class: 'grow', text: t('members') }), h('span', { class: 'cnt', id: 'dr-cnt' }), close),
+    h('div', { class: 'dr-search' }, q), h('div', { class: 'dr-list', id: 'dr-list' }));
+  fillDrawer();
+  dr.hidden = false; back.hidden = false;
+  back.onclick = closeDrawer;
+  document.documentElement.style.overflow = 'hidden';
+  buzz();
+}
+function closeDrawer() {
+  const dr = $('#drawer');
+  if (dr.hidden) return;
+  dr.classList.add('out');
+  setTimeout(() => { dr.hidden = true; $('#drawer-back').hidden = true; if ($('#sheet').hidden) document.documentElement.style.overflow = ''; }, 200);
+}
+function fillDrawer() {
+  const list = $('#dr-list');
+  if (!list || !state) return;
+  const ss = state.sessions;
+  $('#dr-cnt').textContent = ss.length;
+  const keep = list.scrollTop;
+  list.textContent = '';
+  const pick = r => { closeDrawer(); if (r !== room) setRoom(r); };
+  const qq = drawerQ.trim().toLowerCase();
+  if (!qq) list.append(h('button', { class: 'dr-row' + (room === '*' ? ' on' : ''), onclick: () => pick('*') },
+    h('div', { class: 'pf', text: '#' }), h('div', { class: 'grow' }, h('div', { class: 'nm', text: t('allRoom') }), h('div', { class: 'st-msg ell', text: t('allRoomSub') })),
+    room === '*' ? h('span', { class: 'chk', text: '✓' }) : null));
+  const order = { wait: 0, busy: 1, idle: 2, sleep: 3 };
+  const hits = [...ss].filter(s => !qq || (s.name || '').toLowerCase().includes(qq) || (s.goal || '').toLowerCase().includes(qq))
+    .sort((a, b) => order[a.mode] - order[b.mode]);
+  list.append(h('div', { class: 'dr-sec', text: t('sessionsN', hits.length) }));
+  if (!hits.length) list.append(h('div', { class: 'dr-empty', text: t('noMatch') }));
+  hits.forEach(s => {
+    const pf = avatar(s.sid, s.mode);
+    pf.className = 'pf';
+    list.append(h('button', { class: 'dr-row' + (room === s.sid ? ' on' : ''), onclick: () => pick(s.sid) }, pf,
+      h('div', { class: 'grow' }, h('div', { class: 'row', style: 'gap:6px' }, h('div', { class: 'nm ell grow', text: s.name }), chip(s.mode)),
+        h('div', { class: 'st-msg ell', text: s.goal || s.tool || s.cwd || '' })),
+      room === s.sid ? h('span', { class: 'chk', text: '✓' }) : null));
+  });
+  list.scrollTop = keep;
+}
+// 서랍은 오른쪽으로 끌면 손가락을 따라가다 닫힌다
+(function drawerDrag() {
+  const dr = $('#drawer');
+  let d = null;
+  dr.addEventListener('touchstart', e => {
+    d = e.target.closest('input') ? null : { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now(), dx: 0, mode: null };
+  }, { passive: true });
+  dr.addEventListener('touchmove', e => {
+    if (!d) return;
+    const dx = e.touches[0].clientX - d.x, dy = e.touches[0].clientY - d.y;
+    if (!d.mode && Math.hypot(dx, dy) > 10) d.mode = dx > 0 && Math.abs(dx) > Math.abs(dy) * 1.2 ? 'x' : 'y';
+    if (d.mode !== 'x') return;
+    e.preventDefault();
+    d.dx = Math.max(0, dx);
+    dr.style.transition = 'none';
+    dr.style.transform = `translateX(${d.dx}px)`;
+  }, { passive: false });
+  dr.addEventListener('touchend', () => {
+    if (!d || d.mode !== 'x') { d = null; return; }
+    const fast = d.dx / Math.max(1, Date.now() - d.t) > 0.5;
+    dr.style.transition = 'transform .22s cubic-bezier(.2,.8,.2,1)';
+    if (d.dx > 90 || (fast && d.dx > 30)) { dr.style.transform = 'translateX(100%)'; setTimeout(closeDrawer, 200); } else dr.style.transform = '';
+    d = null;
+  });
+})();
 function setRoom(r) { room = r; localStorage.setItem('co.room', r); chatData = null; render(); refreshChat(true); }
 async function refreshChat(force) {
   try {
@@ -877,7 +984,7 @@ function swipeX(el, onSwipe) {  // 좌우로 넘기기 (dir: 오른쪽으로 넘
   let g = null;
   const skip = '.rooms, .thumbs, .chips, .pick, textarea, input, select, .dialog, .seg, .composer';
   document.addEventListener('touchstart', e => {
-    if (!online || !state || !$('#sheet').hidden || e.touches.length > 1 || e.target.closest('#tabs, #top') || e.target.closest(skip)) { g = null; return; }
+    if (!online || !state || !$('#sheet').hidden || !$('#drawer').hidden || e.touches.length > 1 || e.target.closest('#tabs, #top') || e.target.closest(skip)) { g = null; return; }
     g = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now(), mode: null, dx: 0, dy: 0, top: window.scrollY <= 0 };
   }, { passive: true });
   document.addEventListener('touchmove', e => {
@@ -935,6 +1042,7 @@ function swipeX(el, onSwipe) {  // 좌우로 넘기기 (dir: 오른쪽으로 넘
 
 // ───────────── 시작 ─────────────
 $('#refresh-btn').onclick = () => { stateSig = ''; online ? poll() : connect(); };
+$('#menu-btn').onclick = () => { if (online && state) openDrawer(); };
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 if (conf.k) idbPut('conf', conf).catch(() => {});
 render();

@@ -13,7 +13,10 @@
   }
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-html, body { margin: 0; height: 100%; }
+html, body { margin: 0; }
+html { height: 100%; }
+html { overflow-x: clip; }
+body { min-height: 100%; overflow-x: clip; }  /* 넘기기·들어오기 효과가 화면 밖으로 나가도 가로 스크롤바가 생기지 않게 */
 body {
   background: var(--bg); color: var(--fg); font: 15px/1.5 "Pretendard Variable", Pretendard, -apple-system, "Segoe UI",
   "Apple SD Gothic Neo", "Malgun Gothic", "Hiragino Sans", "Microsoft YaHei", sans-serif; overscroll-behavior-y: contain;
@@ -29,6 +32,10 @@ button { font: inherit; color: inherit; }
 .dot.on { background: #b6ffd9; } .dot.off { background: #ff9a9a; }
 .icon-btn { background: rgba(255, 255, 255, .18); border: 0; color: #fff; width: 36px; height: 36px; border-radius: 12px; font-size: 18px; }
 .icon-btn:active { transform: scale(.94); }
+.top-btns { display: flex; gap: 8px; }
+#menu-btn { display: none; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
+#menu-btn i { display: block; width: 16px; height: 2px; border-radius: 1px; background: #fff; }
+body[data-tab="talk"] #menu-btn { display: flex; }
 #view { padding: 14px 14px calc(86px + var(--safe-b)); max-width: 760px; margin: 0 auto; }
 .view-in { animation: viewIn .28s cubic-bezier(.2, .8, .2, 1); }
 .view-in.from-left { animation-name: viewInL; }
@@ -126,6 +133,9 @@ textarea { resize: none; min-height: 44px; max-height: 140px; }
 /* 세션톡 */
 .rooms { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 10px; scrollbar-width: none; }
 .rooms::-webkit-scrollbar { display: none; }
+.rooms { touch-action: pan-x pan-y; overscroll-behavior-x: contain; scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch; }
+.rooms .room { scroll-snap-align: start; }
+.rooms.dragging { scroll-snap-type: none; cursor: grabbing; }
 .room { flex: none; display: flex; flex-direction: column; align-items: center; gap: 3px; width: 64px; border: 0; background: none; padding: 4px 0; font-size: 11px; color: var(--dim); }
 .room img, .room .all { width: 48px; height: 48px; border-radius: 16px; background: var(--mint); image-rendering: pixelated; border: 2px solid transparent; transition: border-color .2s, transform .2s; }
 .room .all { display: grid; place-items: center; font-weight: 800; color: var(--acc-text); }
@@ -196,7 +206,6 @@ details summary { cursor: pointer; color: var(--acc-text); font-size: 13px; marg
 /* ── 손가락 조작 ── */
 html { -webkit-text-size-adjust: 100%; }
 button, .tap, .room, .seat, #tabs, .talk-cur { touch-action: manipulation; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
-#view { touch-action: pan-y; }
 .btn { min-height: 42px; }
 #tabs button { min-height: 58px; }
 #tabs button:active svg { transform: scale(.88); }
@@ -230,3 +239,30 @@ body:not([data-tab="talk"]) .composer.fixed { display: none; }
 /* 시트 위쪽(손잡이·세션·탭)은 고정 */
 .sheet-top { position: sticky; top: -8px; z-index: 2; background: var(--bg); margin: -8px -14px 0; padding: 8px 14px 2px; }
 .sheet-top .grip { width: 44px; height: 5px; }
+/* 세션톡 대화상대 목록 (오른쪽에서 열리는 서랍) */
+#drawer-back { position: fixed; inset: 0; background: rgba(10, 20, 18, .35); z-index: 22; animation: fade .2s; }
+#drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 23; width: min(86vw, 380px); background: var(--bg); display: flex; flex-direction: column;
+  box-shadow: -8px 0 30px rgba(0, 0, 0, .18); animation: fromRight .3s cubic-bezier(.2, .8, .2, 1); touch-action: pan-y;
+}
+#drawer.out { animation: toRight .22s ease-in forwards; }
+@keyframes fromRight { from { transform: translateX(100%); } }
+@keyframes toRight { to { transform: translateX(100%); } }
+.dr-head { display: flex; align-items: center; gap: 8px; padding: calc(14px + var(--safe-t)) 14px 12px; background: linear-gradient(100deg, var(--grad1), var(--grad2)); color: #fff; }
+.dr-head b { font-size: 17px; }
+.dr-head .cnt { font-size: 14px; opacity: .85; }
+.dr-search { padding: 10px 14px 6px; }
+.dr-search input { border-radius: 999px; background: var(--card2); border-color: transparent; padding: 9px 14px; }
+.dr-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 0 0 calc(16px + var(--safe-b)); }
+.dr-sec { font-size: 12px; color: var(--dim); padding: 12px 16px 4px; }
+.dr-row { display: flex; align-items: center; gap: 12px; width: 100%; border: 0; background: none; padding: 8px 16px; text-align: left; min-height: 62px; transition: background .15s; }
+.dr-row:active { background: var(--card2); }
+.dr-row.on { background: var(--mint); }
+.dr-row .pf { width: 46px; height: 46px; border-radius: 17px; background: var(--mint); image-rendering: pixelated; flex: none; object-fit: contain; display: grid; place-items: center; color: var(--acc-text); font-weight: 800; font-size: 18px; }
+.dr-row.on .pf { box-shadow: 0 0 0 2px var(--accent); }
+.dr-row .nm { font-weight: 700; font-size: 15px; }
+.dr-row .st-msg { font-size: 12px; color: var(--dim); }
+.dr-row .chk { color: var(--acc-text); font-weight: 800; flex: none; }
+.dr-empty { text-align: center; color: var(--dim); padding: 30px 10px; }
+#drawer[hidden], #drawer-back[hidden] { display: none; }
+.rooms img { -webkit-user-drag: none; }

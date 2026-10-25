@@ -18,13 +18,18 @@
 <body>
 <header id="top">
   <div class="brand"><span class="dot" id="conn-dot"></span><b>Claude Office</b><span id="conn-text" class="sub"></span></div>
-  <button id="refresh-btn" class="icon-btn" aria-label="refresh">⟳</button>
+  <div class="top-btns">
+    <button id="refresh-btn" class="icon-btn" aria-label="refresh">⟳</button>
+    <button id="menu-btn" class="icon-btn" aria-label="members"><i></i><i></i><i></i></button>
+  </div>
 </header>
 <div id="ptr"><div class="spin"></div></div>
 <main id="view"></main>
 <div id="sheet-back" hidden></div>
 <section id="sheet" hidden></section>
 <div id="toast" hidden></div>
+<div id="drawer-back" hidden></div>
+<aside id="drawer" hidden></aside>
 <nav id="tabs"></nav>
 <script src="app.js"></script>
 </body>
