@@ -381,3 +381,4 @@ body.meet-docs .crop { width: 260px; }
 .ask-more summary { color: var(--acc-text); font-weight: 700; font-size: 13px; margin: 2px 0; }
 .ask-free { margin-top: 4px; }
 .ask-sent { color: var(--acc-text); font-weight: 700; font-size: 13px; }
+.md-img img { display: block; max-width: 100%; max-height: 260px; border-radius: 10px; margin: 4px 0; cursor: zoom-in; border: 1px solid var(--edge); }

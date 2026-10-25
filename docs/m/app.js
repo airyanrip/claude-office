@@ -68,6 +68,7 @@ const STR = {
   askHint: ['→ 나 · 고르면 바로 이어서 진행해요', '→ me · pick to continue', '→ 自分 · 選ぶとすぐ続きます', '→ 我 · 选择后立即继续'],
   askFree: ['✎ 직접 입력…', '✎ Type my own…', '✎ 自分で入力…', '✎ 自行输入…'], askSend: ['답 보내기', 'Send answer', '回答を送る', '发送回答'],
   askSent: ['보냈어요 · {0}', 'Sent · {0}', '送信しました · {0}', '已发送 · {0}'], askPh: ['직접 쓸 답', 'Your answer', '自分の回答', '你的回答'],
+  imgTap: ['(눌러서 보기)', '(tap to view)', '(タップで表示)', '(点击查看)'],
   members: ['대화상대', 'Members', 'メンバー', '成员'], searchName: ['이름 검색', 'Search names', '名前で検索', '搜索名称'],
   allRoom: ['전체 채팅방', 'All chats', '全体チャット', '全部聊天'], allRoomSub: ['모든 세션의 대화를 한곳에서', 'Every session in one place', 'すべてのセッションの会話をまとめて', '所有会话的对话'],
   sessionsN: ['세션 {0}', 'Sessions {0}', 'セッション {0}', '会话 {0}'], noMatch: ['찾는 세션이 없어요', 'No matching session', '該当するセッションがありません', '没有匹配的会话'],
@@ -727,7 +728,7 @@ function vwShow() {
   vw.s = 1; vw.tx = 0; vw.ty = 0;
   vwApply(false);
   img.removeAttribute('src');
-  meetImg(vw.mid, vw.names[vw.i], img);
+  if (vw.mid === '@talk') talkImg(vw.names[vw.i], img); else meetImg(vw.mid, vw.names[vw.i], img);
   $('#viewer .vw-count').textContent = vw.names.length > 1 ? `${vw.i + 1} / ${vw.names.length}` : '';
 }
 function vwGo(d) {
@@ -1059,7 +1060,20 @@ function mdInline(s) {
   if (pos < s.length) out.push(document.createTextNode(s.slice(pos)));
   return out;
 }
-function md(text) {
+// 세션톡 사진: 세션이 답에 ![설명](경로)로 적은 사진을 PC에서 받아 온다 (오래된 대화는 눌러야 받는다)
+const talkImgs = new Map();
+function talkImg(path, img) {
+  if (!talkImgs.has(path)) talkImgs.set(path, api('/api/talkimg?p=' + encodeURIComponent(path), null, { raw: true, timeout: 30000 }).then(b => URL.createObjectURL(b)).catch(() => ''));
+  talkImgs.get(path).then(u => { if (u) img.src = u; else img.replaceWith(h('span', { class: 'small', text: '🖼 ' + path.split(/[\\/]/).pop() })); });
+  return img;
+}
+function imgEl(path, alt, show) {
+  const open = () => openViewer('@talk', [path], 0);
+  if (show) return h('div', { class: 'md-img' }, talkImg(path, h('img', { alt: alt || '', onclick: open })));
+  const btn = h('button', { class: 'linkish', text: `🖼 ${alt || path.split(/[\\/]/).pop()} ${t('imgTap')}`, onclick: () => btn.replaceWith(imgEl(path, alt, true)) });
+  return btn;
+}
+function md(text, showImg = true) {
   const frag = document.createDocumentFragment();
   let code = null, list = null;
   const endList = () => { list = null; };
@@ -1073,6 +1087,11 @@ function md(text) {
     if (!st) { endList(); continue; }
     let m;
     if ((m = st.match(/^(#{1,6})\s+(.*)/))) { endList(); frag.append(h('div', { class: 'md-h' }, mdInline(m[2]))); continue; }
+    if (/^(!\[[^\]\n]*\]\(<?[^)\n<>]+>?\)\s*)+$/.test(st)) {  // 사진만 있는 줄
+      endList();
+      for (const im of st.matchAll(/!\[([^\]\n]*)\]\(<?([^)\n<>]+?)>?\)/g)) frag.append(imgEl(im[2].trim(), im[1], showImg));
+      continue;
+    }
     if (/^((-\s*){3,}|(\*\s*){3,}|(_\s*){3,})$/.test(st)) { endList(); frag.append(h('hr')); continue; }
     if ((m = ln.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)/))) {
       const ordered = !/[-*+]/.test(m[2]);
@@ -1101,11 +1120,13 @@ function drawChat(scroll) {
     chatLimit += 40; drawChat(false);
     window.scrollTo(0, y0 + document.body.scrollHeight - h0);  // 보던 자리 그대로
   } }));
-  chatData.msgs.slice(older).forEach(m => {
+  const shown = chatData.msgs.slice(older);
+  shown.forEach((m, i) => {
+    const showImg = i >= shown.length - 20;  // 최근 약 10턴만 사진을 바로 받는다 (데이터·메모리 절약)
     const me = m.from === 'user';
     box.append(h('div', { class: 'msg ' + (me ? 'me' : 'other') },
       me ? null : h('div', { class: 'who', text: (m.fromLabel || '') + (room === '*' && m.toLabel ? ' → ' + (m.to === 'user' ? t('me') : m.toLabel) : '') }),
-      h('div', { class: 'b md' }, md(m.text)),
+      h('div', { class: 'b md' }, md(m.text, showImg)),
       h('div', { class: 'meta', text: (me && m.read ? t('read') + ' · ' : '') + ago(m.ts) })));
   });
   (chatData.asks || []).filter(a => room === '*' || a.sid === room).forEach(a => box.append(askCard(a)));

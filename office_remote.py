@@ -1123,7 +1123,7 @@ def api_send(r, dev, q, body):
     def run():
         if sid not in r.app.mon.sessions:
             raise ValueError('session is off')
-        r.app.mon.send_user(sid, text)
+        r.app.mon.send_user(sid, text, r.co.talk_text(sid, text)[len(text):])
         return {'ok': True}
 
     return r.ui(run)
@@ -1139,6 +1139,27 @@ def api_answer(r, dev, q, body):
     if not answers:
         raise ValueError('answer')
     return r.ui(lambda: {'ok': bool(r.app.answer_ask(sid, {'id': ask_id}, answers))})
+
+
+def api_talkimg(r, dev, q, body):
+    """세션톡 사진: 세션이 답에 ![설명](경로)로 적은 사진만 (아무 파일이나 내주지 않게). PNG·GIF·JPG·WEBP, 15MB까지."""
+    path = q.get('p', '')
+    ext = os.path.splitext(path)[1].lower()
+    types = {'.png': 'image/png', '.gif': 'image/gif', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp'}
+    if ext not in types or not os.path.isabs(path):
+        raise ValueError('path')
+    now = time.time()
+    if now - r.__dict__.get('_img_at', 0) > 10:  # 세션톡에 적힌 사진 경로 (10초마다 새로)
+        fake = type('F', (), {})()
+        fake.app = r.app
+        msgs = r.ui(lambda: r.co.ChatWin.collect(fake)[0])
+        r._img_refs = {os.path.normcase(os.path.abspath(p.strip())) for m in msgs for _a, p in r.co.MD_IMG.findall(m.get('text') or '')}
+        r._img_at = now
+    real = os.path.normcase(os.path.abspath(path))
+    if real not in r._img_refs or not os.path.isfile(real) or os.path.getsize(real) > 15 * 1024 * 1024:
+        raise ValueError('not shared')
+    with open(real, 'rb') as f:
+        return f.read(), types[ext], 'private, max-age=3600'
 
 
 def api_brief(r, dev, q, body):
@@ -1316,7 +1337,7 @@ def api_alerts(r, dev, q, body):
 API = {
     ('GET', '/api/state'): api_state, ('GET', '/api/session'): api_session, ('GET', '/api/chat'): api_chat,
     ('POST', '/api/send'): api_send, ('POST', '/api/brief'): api_brief, ('POST', '/api/choice'): api_choice,
-    ('POST', '/api/answer'): api_answer,
+    ('POST', '/api/answer'): api_answer, ('GET', '/api/talkimg'): api_talkimg,
     ('POST', '/api/secmark'): api_secmark, ('POST', '/api/meeting/start'): api_meet_start,
     ('POST', '/api/meeting/end'): api_meet_end, ('POST', '/api/meeting/presented'): api_meet_presented,
     ('GET', '/api/img'): api_img, ('GET', '/api/sprite'): api_sprite, ('GET', '/api/past'): api_past,

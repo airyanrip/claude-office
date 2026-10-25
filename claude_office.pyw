@@ -47,6 +47,8 @@ QA_MAX = 8000                   # 대화 탭: 요청·답변 하나의 최대 �
 QA_KEEP = 60                    # 대화 탭: 세션마다 기억하는 Q&A 수
 TALK_HISTORY = 20               # 세션톡: 세션마다 보여 주는 최근 대화 (터미널에서 직접 나눈 것 포함)
 TALK_PAGE = 50                  # 세션톡: 처음에 그리는 메시지 수 (위의 [이전 대화 더 보기]로 더)
+TALK_IMG_RECENT = 20            # 세션톡: 사진을 바로 보여 주는 최근 메시지 수 (약 10턴). 그보다 오래된 건 눌러야 보인다
+TALK_IMG_MAX = 300 * 1024 * 1024  # 세션톡 사진 폴더가 이보다 커지면 오래된 것부터 지운다
 QA_SCAN = 1_500_000_000         # 대화 탭: 요청을 찾으러 거슬러 올라가는 최대 바이트
 QA_ANSWER_SCAN = 64_000_000     # 대화 탭: 요청 하나의 답변을 찾는 최대 바이트
 LIVE_CHUNK = 16 * 1024 * 1024   # 한 번 폴링에 읽는 최대 바이트
@@ -711,6 +713,52 @@ def clean_empty_sessions(live, min_age=600, peer_age=3600):
     return n_tr, n_peer
 
 
+TALK_IMG_DIR = os.path.join(COLLAB, 'talk')     # 세션톡에 보여 줄 사진을 세션이 저장하는 곳
+IMG_WANT = re.compile(r'캡처|캡쳐|스크린\s*샷|사진|이미지|화면을?\s*(보여|보내|찍)|screen\s*shot|capture|image|picture|photo|'
+                      r'スクショ|キャプチャ|画像|写真|截图|截屏|图片|照片', re.I)
+IMG_HINT = T('[세션톡 사진 안내] 사진을 보여 줄 때는 PNG로 {0} 폴더에 저장하고, 답에 ![설명](파일 전체 경로) 한 줄로 적으세요. '
+             '화면 캡처: powershell -ExecutionPolicy Bypass -File "{1}" -Out "{0}\\이름.png" -Title "창 제목 일부" (-Title을 빼면 전체 화면).')
+
+
+def talk_text(sid, text):
+    """세션톡에서 보내는 명령: 사진·캡처를 원하면 저장 위치와 보여 주는 법을 덧붙인다 (그럴 때만 — 토큰 절약)."""
+    if not IMG_WANT.search(text):
+        return text
+    folder = os.path.join(TALK_IMG_DIR, sid[:8])
+    return text + '\n\n' + IMG_HINT.format(folder, CAPTURE_PS1)
+
+
+def strip_hint(text):
+    """대화에 보일 때는 사진 안내를 뺀다."""
+    i = text.find(IMG_HINT.split('{0}')[0][:16])
+    return text[:i].rstrip() if i > 0 else text
+
+
+def clean_talk_images(limit=TALK_IMG_MAX):
+    """세션톡 사진 폴더가 limit을 넘으면 오래된 사진부터 지운다 (넘지 않으면 그대로 둔다). 지운 수."""
+    files = []
+    for root_, _d, fs in os.walk(TALK_IMG_DIR):
+        for f in fs:
+            p = os.path.join(root_, f)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            files.append((st.st_mtime, st.st_size, p))
+    total = sum(x[1] for x in files)
+    n = 0
+    for _m, size, p in sorted(files):
+        if total <= limit * 0.7 or total <= limit and n == 0:
+            break
+        try:
+            os.remove(p)
+            total -= size
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
 def read_ask(sid):
     """세션이 지금 고르라고 묻는 중이면 {id, at, questions:[{question, header, multiSelect, options:[{label, description}]}]}.
     진행 패널 mod가 협업 폴더 ask-<세션>.json 에 적고, 답하면 done 으로 바꾼다."""
@@ -1335,8 +1383,9 @@ class Monitor:
                 del self.chat[k]
         self.msg_first = False
 
-    def send_user(self, sid, text):
-        """대화창에서 사용자가 쓴 명령을 out-office-user.json에 적는다. 진행 패널 mod가 그 세션에 사용자 요청으로 넣는다."""
+    def send_user(self, sid, text, extra=''):
+        """대화창에서 사용자가 쓴 명령을 out-office-user.json에 적는다. 진행 패널 mod가 그 세션에 사용자 요청으로 넣는다.
+        extra는 세션에만 가는 덧붙임(사진 안내 등) — 세션톡 말풍선에는 보이지 않는다."""
         text = text.strip()
         if not text:
             return
@@ -1347,7 +1396,7 @@ class Monitor:
             n, r = divmod(n, 36)
             base36 = '0123456789abcdefghijklmnopqrstuvwxyz'[r] + base36
         msg = {'id': f'office-{base36}-{os.urandom(2).hex()}', 'from': 'office-user', 'fromLabel': '사용자',
-               'to': sid, 'kind': 'request', 'text': text, 'at': now_ms}
+               'to': sid, 'kind': 'request', 'text': text + extra, 'at': now_ms}
         out = read_json(USER_OUT)
         out = (out if isinstance(out, list) else [])[-199:] + [msg]
         os.makedirs(COLLAB, exist_ok=True)
@@ -1805,6 +1854,7 @@ def ease_back(t):  # 살짝 지나쳤다가 제자리 (튀어나오는 것)
 
 
 # ── 마크다운 (Claude Code 터미널처럼 세션톡 말풍선에) ──
+MD_IMG = re.compile(r'!\[([^\]\n]*)\]\(<?([^)\n<>]+?)>?\)')
 MD_INLINE = re.compile(r'\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__|`([^`\n]+)`|~~(?=\S)(.+?)(?<=\S)~~'
                        r'|\[([^\]\n]+)\]\(([^)\s]+)\)|(?<![*A-Za-z0-9])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![*A-Za-z0-9])|(?<![_A-Za-z0-9])_(?=\S)([^_\n]+?)(?<=\S)_(?![_A-Za-z0-9])')
 # (한국어 조사가 닫는 * 바로 뒤에 붙어도 기울임으로: 둘레 검사는 영문·숫자만)
@@ -1862,6 +1912,11 @@ def md_blocks(text):
         if m:
             out.append(('h', '', md_inline(m.group(2), 'b')))
             continue
+        imgs = MD_IMG.findall(st)
+        if imgs and not MD_IMG.sub('', st).strip():  # 사진만 있는 줄
+            for alt, path in imgs:
+                out.append(('img', '', [(path.strip(), alt.strip())]))
+            continue
         if re.fullmatch(r'(-\s*){3,}|(\*\s*){3,}|(_\s*){3,}', st):
             out.append(('hr', '', []))
             continue
@@ -1886,7 +1941,7 @@ def md_blocks(text):
 _MD_TOKEN = re.compile(r'\s+|[A-Za-z0-9_\-./:@#%&+=?!,;\'"()\[\]{}<>~^$*|\\]+|.')
 
 
-def md_layout(text, maxw, fonts):
+def md_layout(text, maxw, fonts, img=None):
     """마크다운을 maxw 안에 줄바꿈해 그릴 조각들로. ([('t', x, y, 글자, 스타일) | ('bg', x0, y0, x1, y1) | ('bar', x, y0, y1)
     | ('hr', x0, x1, y)], 너비, 높이). 좌표는 왼쪽 위 기준."""
     fb, fbb, fi, fm = fonts['body'], fonts['bodyb'], fonts['bodyi'], fonts['mono']
@@ -1896,6 +1951,19 @@ def md_layout(text, maxw, fonts):
     for kind, prefix, runs in md_blocks(text):
         if kind == 'gap':
             y += lh * 0.4
+            continue
+        if kind == 'img':  # 사진: img(경로) → PhotoImage(그릴 때) 또는 None(오래된 대화·못 읽음 → 눌러 보는 줄)
+            path, alt = runs[0]
+            ph = img(path) if img else None
+            if ph:
+                ops.append(('img', 0, y, path, ph))
+                used = max(used, ph.width())
+                y += ph.height() + lh * 0.3
+            else:
+                label = '🖼 ' + (alt or os.path.basename(path)) + '  ' + T('(눌러서 보기)')
+                ops.append(('imglink', 0, y, path, label))
+                used = max(used, min(maxw, fb.measure(label)))
+                y += lh
             continue
         if kind == 'hr':
             ops.append(('hr', 0, maxw, y + lh / 2))
@@ -1959,6 +2027,20 @@ def md_layout(text, maxw, fonts):
     return final, used, max(y, lh)
 
 
+def open_talk_image(path):
+    """세션톡 사진을 크게 보기 (PNG·GIF는 앱 안에서, 그 밖의 형식은 기본 프로그램으로)."""
+    if not os.path.isfile(path):
+        _APP[0].toast(T('사진 파일이 없어요 · {0}').format(path), warn=True) if _APP else None
+        return
+    if path.lower().endswith(('.png', '.gif')) and _APP:
+        ImageViewer(_APP[0], [path], 0)
+    else:
+        os.startfile(path)
+
+
+_APP = []  # 지금 앱 (사진 크게 보기 창을 띄울 때)
+
+
 def md_draw(c, ops, ox, oy, fonts, fg, code_fg, code_bg, link_fg, dim):
     """md_layout의 조각들을 (ox, oy)에 그린다."""
     fb, fbb, fi, fm = fonts['body'], fonts['bodyb'], fonts['bodyi'], fonts['mono']
@@ -1970,6 +2052,13 @@ def md_draw(c, ops, ox, oy, fonts, fg, code_fg, code_bg, link_fg, dim):
             c.create_line(ox + o[1], oy + o[2], ox + o[1], oy + o[3], fill=dim, width=3)
         elif k == 'hr':
             c.create_line(ox + o[1], oy + o[3], ox + o[2], oy + o[3], fill=dim)
+    for o in ops:
+        if o[0] == 'img':
+            t = c.create_image(ox + o[1], oy + o[2], image=o[4], anchor='nw')
+            c.tag_bind(t, '<Button-1>', lambda e, p=o[3]: open_talk_image(p))
+        elif o[0] == 'imglink':
+            t = c.create_text(ox + o[1], oy + o[2], text=o[4], anchor='nw', font=fb, fill=link_fg)
+            c.tag_bind(t, '<Button-1>', lambda e, p=o[3]: open_talk_image(p))
     for o in ops:
         if o[0] != 't':
             continue
@@ -2593,7 +2682,8 @@ class ChatWin:
         sh = tk.Frame(side, bg=CARD, padx=16, pady=12)
         sh.pack(fill='x')
         tk.Label(sh, text=T('세션톡'), font=F['brand'], bg=CARD, fg=FG).pack(side='left')
-        tk.Label(sh, text=T('세션끼리 주고받은 일'), font=F['small'], bg=CARD, fg=DIM).pack(side='left', padx=8, pady=(4, 0))
+        tk.Label(sh, text=fit(T('세션끼리 주고받은 일'), F['small'], int(280 * Z) - F['brand'].measure(T('세션톡')) - 48), font=F['small'],
+                 bg=CARD, fg=DIM).pack(side='left', padx=8, pady=(4, 0))
         tk.Frame(side, bg=EDGE, height=1).pack(fill='x')
         self.rooms_cv, self.rooms = scroll_frame(side, CARD)
         main = tk.Frame(w, bg=self.CHAT_BG)
@@ -2692,7 +2782,7 @@ class ChatWin:
             self.win.after(700, lambda: self.to_btn.configure(bg=CHAT['chip']))
             return
         try:
-            self.app.mon.send_user(self.target, text)
+            self.app.mon.send_user(self.target, text, talk_text(self.target, text)[len(text):])
         except OSError as ex:
             tkmsg.showerror(T('보내기 실패'), str(ex), parent=self.win)
             return
@@ -2730,6 +2820,8 @@ class ChatWin:
         out, typing, used = [], {}, set()
         for m in msgs:
             m = dict(m)
+            if m['from'] == 'user':
+                m['text'] = strip_hint(m['text'])  # 세션에만 가는 사진 안내는 대화에 보이지 않게
             out.append(m)
             if m['from'] != 'user' or m['to'] not in qa:
                 continue
@@ -2751,7 +2843,7 @@ class ChatWin:
                 if (sid, e[0]) in used or not e[1]:
                     continue
                 out.append({'id': f'h-{sid[:8]}-{e[0]:.3f}', 'from': 'user', 'to': sid, 'fromLabel': T('나'),
-                            'toLabel': names.get(sid, ''), 'kind': 'question', 'text': e[1], 'ts': e[0], 'read': True, 'cli': True})
+                            'toLabel': names.get(sid, ''), 'kind': 'question', 'text': strip_hint(e[1]), 'ts': e[0], 'read': True, 'cli': True})
                 if e[3]:
                     out.append({'id': f'h-{sid[:8]}-{e[0]:.3f}-a', 'from': sid, 'fromLabel': names.get(sid, ''), 'to': 'user',
                                 'toLabel': T('나'), 'kind': 'answer', 'text': e[3], 'ts': max(e[2], e[0] + 0.001), 'reply': True,
@@ -2990,6 +3082,7 @@ class ChatWin:
         if not msgs:
             c.create_text(W / 2, 80 * Z, text=T('아직 주고받은 메시지가 없어요.\n세션끼리 협업 메시지를 보내면 여기에 대화로 쌓입니다.'),
                           justify='center', font=F['body'], fill=CHAT['empty'])
+        recent = {id(m) for m in msgs[-TALK_IMG_RECENT:]}  # 최근 약 10턴만 사진을 바로 그린다 (메모리 절약)
         for m in msgs:
             d = datetime.date.fromtimestamp(m['ts'])
             if d != day:
@@ -3002,11 +3095,12 @@ class ChatWin:
                 y = y1 + 16 * Z
                 prev_from = None
             text = m['text'] if len(m['text']) <= 1200 else m['text'][:1200] + T(' …(이하 생략)')
-            key = (text, maxw, self.app.Z)
+            show = id(m) in recent
+            key = (text, maxw, self.app.Z, show)
             if key not in self.md_cache:
                 if len(self.md_cache) > 800:
                     self.md_cache.clear()
-                self.md_cache[key] = md_layout(text, maxw, F)
+                self.md_cache[key] = md_layout(text, maxw, F, self._talk_img if show else None)
             ops, tw, th = self.md_cache[key]
             mine = m['from'] == 'user'
             kind = T('명령') if mine else (T('답변') if m.get('reply') else KIND_TEXT.get(m['kind'], ''))
@@ -3078,6 +3172,13 @@ class ChatWin:
         c.configure(scrollregion=(0, 0, W, y + 10 * Z))
         if at_end:
             c.yview_moveto(1.0)
+
+    def _talk_img(self, path):
+        """세션톡 말풍선에 넣을 사진 (폭 360·높이 240 안으로). PNG·GIF가 아니거나 없으면 None."""
+        if not path.lower().endswith(('.png', '.gif')) or not os.path.isfile(path):
+            return None
+        Z = self.app.Z
+        return photo_fit(path, int(360 * Z), int(240 * Z), self.app.__dict__.setdefault('talk_imgs', {}))
 
     def _ask_card(self, c, y, sid, ask, names):
         """Claude가 고르라고 묻는 질문: 선택지를 누르면 그 답으로 이어 간다 (여럿 고르기·직접 입력도)."""
@@ -5660,6 +5761,7 @@ class App:
         else:
             root.after(4000, self._maybe_mod)  # 이미 쓰던 PC: 더 새 mod가 들어 있으면 업데이트를 권한다
         root.after(20_000, self._clean_loop)
+        _APP[:] = [self]
 
     def _clean_loop(self):
         """켤 때와 30분마다 빈 세션 기록·꺼진 세션의 상태 파일을 치운다 (파일 읽기는 다른 스레드에서)."""
@@ -5672,6 +5774,8 @@ class App:
                 n = clean_empty_sessions(live)
                 if any(n):
                     print('cleaned empty sessions', n, file=sys.stderr)
+                if clean_talk_images():
+                    print('cleaned old talk images', file=sys.stderr)
             except Exception as ex:
                 print('clean error', ex, file=sys.stderr)
 
