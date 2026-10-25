@@ -5315,8 +5315,10 @@ class RemoteWin:
             elif time.time() - self.pairing[1] > 600:
                 self.hide_qr(revoke=True)
         if on and r.url:
-            self.share_note.configure(text=T('복사한 주소로 들어온 기기는 암호를 맞혀야 연결돼요.') if r.has_password
-                                      else T('주소로 새 기기를 연결하려면 먼저 암호를 정해야 해요.'))
+            self.share_note.configure(text=(T('복사한 주소로 들어온 기기는 암호를 맞혀야 연결돼요.') if r.has_password
+                                       else T('주소로 새 기기를 연결하려면 먼저 암호를 정해야 해요.'))
+                                      + ('\n' + T('휴대폰 앱 페이지(GitHub Pages)가 열리지 않아 지금 터널 주소로 건네요. 원격을 다시 켜면 주소가 바뀌니 새로 복사해 주세요.')
+                                         if r.app_ok is False else ''))
             if not self.share.winfo_ismapped():
                 self.share.pack(fill='x', pady=(8, 0), after=self.url)
         elif self.share.winfo_ismapped():

@@ -135,8 +135,10 @@ Claude Code sessions started **after** the mod is installed pick it up. Settings
    Add to Home Screen).
 4. **Open phone screen** shows the same app in a phone-sized window on the PC (local only) — handy to try it out.
 
-The phone app itself is a static page served from this repository's GitHub Pages
-(`https://airyanrip.github.io/claude-office/m/`); the tunnel only carries the API. Approving tool permissions still
+The phone app is a static page served from this repository's GitHub Pages
+(`https://airyanrip.github.io/claude-office/m/`), so its address stays the same. If that page can't be reached, links
+and QR codes automatically use the PC's own copy at `<tunnel address>/m/` instead (that address changes whenever
+Remote restarts, so copy it again). Approving tool permissions still
 happens in the PC terminal. Turn Remote off when you are not using it.
 
 ### session-panel mod
@@ -287,7 +289,8 @@ mod를 설치한 **뒤에** 켜는 Claude Code 세션부터 적용돼요. 설정
 3. 휴대폰 브라우저에서 **홈 화면에 추가**하면 앱처럼 쓸 수 있고, *더보기*에서 알림을 켜면 확인이 필요할 때 알려 줘요. 아이폰은 Safari 공유 → 홈 화면에 추가로 설치한 뒤 거기서 열어야 알림이 와요.
 4. **[휴대폰 화면 열기]**로 PC에서 같은 앱을 휴대폰 크기 창으로 미리 볼 수 있어요(PC 안에서만).
 
-휴대폰 앱 화면은 이 저장소의 GitHub Pages(`https://airyanrip.github.io/claude-office/m/`)에서 받아 오고, 터널로는 데이터만 오가요.
+휴대폰 앱 화면은 이 저장소의 GitHub Pages(`https://airyanrip.github.io/claude-office/m/`)에서 받아 와서 주소가 바뀌지 않아요.
+Pages가 열리지 않으면 주소 복사·QR이 자동으로 PC가 직접 내주는 `<터널 주소>/m/`를 써요(원격을 다시 켜면 바뀌니 그때 다시 복사).
 도구 권한 승인은 여전히 PC 터미널에서 해요. 쓰지 않을 땐 원격을 꺼 두세요.
 
 ### session-panel mod

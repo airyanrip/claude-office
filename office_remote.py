@@ -474,11 +474,31 @@ class Remote:
         self.alerts = []         # 휴대폰에 알릴 것 [{id, ts, title, body, sid}]
         self.q = queue.Queue()   # Tk 스레드에서 돌릴 일
         self.sprites = {}
+        self.app_ok = None       # 휴대폰 앱 주소(GitHub Pages)가 열리는지 (None = 아직 모름)
         self.save()
 
     @property
     def app_url(self):
         return (self.app.cfg.get('remote_app') or APP_ORIGIN + APP_PATH)
+
+    @property
+    def link_base(self):
+        """휴대폰에 건네는 앱 주소: GitHub Pages(바뀌지 않음)가 열리면 그곳, 안 열리면 지금 터널의 /m/
+        (PC가 같은 앱을 직접 내준다 — 원격을 다시 켜면 주소가 바뀐다)."""
+        if self.app_ok is False and self.url:
+            return self.url + '/m/'
+        return self.app_url
+
+    def check_app(self):
+        """휴대폰 앱 주소(GitHub Pages 등)가 열리는지 확인해 둔다 (다른 스레드에서)."""
+        try:
+            req = urllib.request.Request(self.app_url, method='GET', headers={'User-Agent': 'claude-office'})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                ok = r.status == 200 and b'claude' in r.read(4000).lower()
+        except (OSError, urllib.error.URLError, ValueError):
+            ok = False
+        self.app_ok = ok
+        self.note('phone app page ' + ('ok' if ok else 'not reachable → using the tunnel'))
 
     @property
     def app_origin(self):
@@ -558,6 +578,7 @@ class Remote:
         self.note(f'tunnel {url or "down"}')
         if url:
             threading.Thread(target=self._publish, args=(url,), daemon=True).start()
+            threading.Thread(target=self.check_app, daemon=True).start()
 
     def _announce_loop(self):
         """ntfy는 12시간 보관이라 켜져 있는 동안 6시간마다 다시 알린다."""
@@ -614,7 +635,7 @@ class Remote:
         with self.lock:
             self.codes = {h: v for h, v in self.codes.items() if v[0] > now}
             self.codes[hashlib.sha256(code.encode()).hexdigest()] = (now + PAIR_SECS, dev_id)
-        return dev_id, f'{self.app_url}#{self._frag(p=code)}'
+        return dev_id, f'{self.link_base}#{self._frag(p=code)}'
 
     def cancel_pair(self, dev_id):
         with self.lock:
@@ -633,7 +654,7 @@ class Remote:
 
     def share_link(self):
         """복사해서 건네는 주소: 열쇠·코드는 없다. 이 주소로 들어온 기기는 암호를 맞혀야 연결된다."""
-        return f'{self.app_url}#{self._frag()}'
+        return f'{self.link_base}#{self._frag()}'
 
     # ── 암호 ──
     @property
