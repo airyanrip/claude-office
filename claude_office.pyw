@@ -1527,6 +1527,10 @@ def meeting_start(app, sids, turns):
     return len(m['members'])
 
 
+# 회의실 대사 타이핑 속도 (글자 사이 시간 배율, 0 = 한 번에)
+TYPE_SPEEDS = (('slow', 1.6), ('normal', 1.0), ('fast', 0.45), ('instant', 0))
+TYPE_SPEED_TEXT = {'slow': T('느리게'), 'normal': T('보통'), 'fast': T('빠르게'), 'instant': T('바로')}
+
 MODE_TEXT = {'busy': T('작업 중'), 'wait': T('확인 필요'), 'idle': T('휴식'), 'sleep': T('조는 중')}
 MODE_COL = {'busy': '#2fb985', 'wait': '#f0a020', 'idle': '#5b9ee8', 'sleep': '#9a86c8'}
 LINE_COLS = ['#7fdbca', '#c792ea', '#ffcb6b', '#82aaff', '#f78c6c']
@@ -1739,6 +1743,11 @@ def draw_icon(c, kind, cx, cy, s, col, bg='#ffffff', tags=()):
         c.create_line(cx - s * 0.95, cy + s * 0.2, cx + s * 0.95, cy + s * 0.2, fill=bg, width=max(1, w * 0.6), tags=tags)
         c.create_line(cx - s * 0.6, cy + s * 0.55, cx - s * 0.6, cy + s * 0.92, **kw)
         c.create_line(cx + s * 0.6, cy + s * 0.55, cx + s * 0.6, cy + s * 0.92, **kw)
+    elif kind == 'type':  # 대사 속도: 말풍선 안에 길이가 다른 줄
+        round_rect(c, cx - s * 0.85, cy - s * 0.7, cx + s * 0.85, cy + s * 0.45, s * 0.3, outline=col, width=w, tags=tags)
+        c.create_polygon(cx - s * 0.45, cy + s * 0.38, cx - s * 0.55, cy + s * 0.85, cx - s * 0.1, cy + s * 0.42, fill=col, outline='', tags=tags)
+        for k, (x1, y_) in enumerate(((0.5, -0.36), (0.15, -0.08), (-0.15, 0.2))):
+            c.create_line(cx - s * 0.5, cy + s * y_, cx + s * x1, cy + s * y_, **kw)
     elif kind == 'phone':  # 원격 조종: 휴대폰 + 전파
         round_rect(c, cx - s * 0.42, cy - s * 0.85, cx + s * 0.32, cy + s * 0.85, s * 0.16, outline=col, width=w, tags=tags)
         c.create_line(cx - s * 0.18, cy + s * 0.6, cx + s * 0.08, cy + s * 0.6, **kw)
@@ -3343,7 +3352,7 @@ class MeetingWin:
                 c.tag_bind(it, '<Button-1>', lambda e: (self.scene.focus_set(), self.next()))
         self.text_px = x1 - x0 - 110 * Z
         if self.typing() and not self.ty['job']:  # 창이 그려지기 전에 시작한 대사는 여기서 이어 친다
-            self.ty['job'] = self.win.after(self.TYPE_MS, self._type)
+            self.ty['job'] = self.win.after(max(1, int(self.TYPE_MS * self.app.type_scale())), self._type)
 
     def say_system(self, m):
         got = sum(1 for r in self.roster if r['report'])
@@ -3412,7 +3421,7 @@ class MeetingWin:
         if self.ty['job']:
             self.win.after_cancel(self.ty['job'])
         self.ty = {'text': text, 'n': 0, 'job': None}
-        if not self.app.anim_on.get():
+        if not self.app.anim_on.get() or self.app.type_scale() == 0:
             self.ty['n'] = len(text)
         self._type()
 
@@ -3428,7 +3437,7 @@ class MeetingWin:
             return
         ch = ty['text'][ty['n']]
         ty['n'] += 1
-        ty['job'] = self.win.after(self.PAUSE.get(ch, self.TYPE_MS), self._type)
+        ty['job'] = self.win.after(max(1, int(self.PAUSE.get(ch, self.TYPE_MS) * self.app.type_scale())), self._type)
 
     def typing(self):
         return self.ty['n'] < len(self.ty['text'])
@@ -4660,6 +4669,7 @@ class App:
                  ('pin', T('항상 위'), lambda: (self.topmost.set(not self.topmost.get()), self.toggle_top()),
                   T('켬') if self.topmost.get() else T('끔'), 0),
                  ('play', T('움직임'), lambda: self.anim_on.set(not self.anim_on.get()), T('켬') if self.anim_on.get() else T('끔'), 0),
+                 ('type', T('대사 속도'), self.cycle_type_speed, TYPE_SPEED_TEXT[self.type_speed()], 0),
                  ('window', T('창으로 열기'), self.toggle_popup, T('켬') if self.popup.get() else T('끔'), 0),
                  ('moon', T('다크 테마'), self.toggle_theme, T('켬') if DARK else T('끔'), 0),
                  ('globe', T('언어'), self.pick_lang, dict(LANGS)[LANG], 0)]
@@ -6222,6 +6232,19 @@ class App:
         if self.launchwin and self.launchwin.win.winfo_exists():
             self.launchwin.win.destroy()  # 꺼진 세션 목록은 열 때마다 새로
         self.launchwin = LaunchWin(self)
+
+    def type_speed(self):
+        v = self.cfg.get('type_speed')
+        return v if v in dict(TYPE_SPEEDS) else 'normal'
+
+    def type_scale(self):
+        return dict(TYPE_SPEEDS)[self.type_speed()]
+
+    def cycle_type_speed(self):
+        keys = [k for k, _ in TYPE_SPEEDS]
+        self.cfg['type_speed'] = keys[(keys.index(self.type_speed()) + 1) % len(keys)]
+        self.save_cfg()
+        self.toast(T('회의실 대사 속도: {0}').format(TYPE_SPEED_TEXT[self.type_speed()]))
 
     # ── 원격 조종 (휴대폰 웹앱) ──
     def open_remote(self):

@@ -67,6 +67,8 @@ const STR = {
   ago: ['{0}분 전', '{0}m ago', '{0}分前', '{0} 分钟前'], now: ['방금', 'now', 'たった今', '刚刚'],
   today: ['오늘 {0} 토큰', '{0} tokens today', '今日 {0} トークン', '今日 {0} token'],
   presentAgain: ['다시 듣기', 'Replay', 'もう一度', '重听'],
+  typeSpeed: ['회의실 대사 속도', 'Meeting dialogue speed', '会議室のセリフ速度', '会议室台词速度'],
+  sp_slow: ['느리게', 'Slow', 'ゆっくり', '慢'], sp_normal: ['보통', 'Normal', '普通', '普通'], sp_fast: ['빠르게', 'Fast', '速く', '快'], sp_instant: ['바로', 'Instant', '即時', '立即'],
 };
 let LANG = (localStorage.getItem('co.lang') || navigator.language || 'ko').slice(0, 2);
 const LI = () => ({ ko: 0, en: 1, ja: 2, zh: 3 })[LANG] ?? 1;
@@ -138,14 +140,16 @@ async function idbPut(k, v) {
 
 // ───────────── PC와 통신 ─────────────
 let online = false, revoked = false, pcOff = false;
-async function api(path, body, { timeout = 12000, raw = false } = {}) {
+const etags = {};
+async function api(path, body, { timeout = 12000, raw = false, etag = false } = {}) {
   if (!conf.u) throw new Error('no address');
   const ctl = new AbortController();
   const tm = setTimeout(() => ctl.abort(), timeout);
   try {
     const r = await fetch(conf.u + path, {
       method: body ? 'POST' : 'GET', signal: ctl.signal, cache: 'no-store', referrerPolicy: 'no-referrer',
-      headers: Object.assign({ Authorization: 'Bearer ' + conf.k }, body ? { 'Content-Type': 'application/json' } : {}),
+      headers: Object.assign({ Authorization: 'Bearer ' + conf.k }, body ? { 'Content-Type': 'application/json' } : {},
+        etag && etags[path] ? { 'X-If-Same': etags[path][0] } : {}),
       body: body ? JSON.stringify(body) : undefined,
     });
     if (r.status === 401) { revoked = true; throw new Error('unauthorized'); }
@@ -154,7 +158,11 @@ async function api(path, body, { timeout = 12000, raw = false } = {}) {
       try { msg = (await r.json()).error || msg; } catch (e) { /* 무시 */ }
       throw new Error(String(msg));
     }
-    return raw ? r.blob() : r.json();
+    if (raw) return r.blob();
+    const data = await r.json();
+    if (etag && data.same && etags[path]) return etags[path][1];  // 바뀐 게 없음 (휴대폰 데이터 절약)
+    if (etag && r.headers.get('X-Etag')) etags[path] = [r.headers.get('X-Etag'), data];
+    return data;
   } finally { clearTimeout(tm); }
 }
 async function ping(u) {
@@ -223,7 +231,7 @@ async function poll() {
   clearTimeout(pollTimer);
   if (document.hidden) { pollTimer = setTimeout(poll, 4000); return; }
   try {
-    const s = await api('/api/state');
+    const s = await api('/api/state', null, { etag: true });
     online = true; setConn('on');
     const sig = JSON.stringify(s, (k, v) => (k === 'now' ? 0 : v));
     if (sig !== stateSig) { stateSig = sig; state = s; render(true); }
@@ -488,7 +496,7 @@ function viewTalk(v) {
 function setRoom(r) { room = r; localStorage.setItem('co.room', r); chatData = null; render(); refreshChat(true); }
 async function refreshChat(force) {
   try {
-    const d = await api('/api/chat?room=' + encodeURIComponent(room));
+    const d = await api('/api/chat?room=' + encodeURIComponent(room), null, { etag: true });
     const sig = JSON.stringify(d);
     if (sig === chatSig && !force) return;
     chatSig = sig; chatData = d;
@@ -678,14 +686,15 @@ function typeOut(text) {
   const el = $('#dlg-txt'), more = $('#dlg-more');
   if (!el) return;
   more.hidden = true;
-  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches || typeScale() === 0;
   const step = () => {
     if (!$('#dlg-txt')) return;
     talk.n = reduce ? text.length : talk.n + 1;
     el.textContent = text.slice(0, talk.n);
     if (talk.n >= text.length) { more.hidden = !talk.sid; return; }
     const ch = text[talk.n - 1];
-    talk.timer = setTimeout(step, '.!?。！？\n'.includes(ch) ? 260 : ',，、'.includes(ch) ? 110 : 28);  // 초당 약 35자, 문장 끝에서 잠깐
+    const base = '.!?。！？\n'.includes(ch) ? 260 : ',，、'.includes(ch) ? 110 : 28;  // 보통 = 초당 약 35자, 문장 끝에서 잠깐
+    talk.timer = setTimeout(step, Math.max(1, base * typeScale()));
   };
   step();
 }
@@ -704,6 +713,10 @@ function autoPresent(m) {
   if (next) { setTimeout(() => { if (!talk.sid && tab === 'meet') present(next.sid); }, 500); return true; }
   return false;
 }
+
+const SPEEDS = { slow: 1.6, normal: 1, fast: 0.45, instant: 0 };
+function typeSpeed() { const v = localStorage.getItem('co.typeSpeed'); return v in SPEEDS ? v : 'normal'; }
+function typeScale() { return SPEEDS[typeSpeed()]; }
 
 // ───────────── 더보기 ─────────────
 let past = null;
@@ -746,6 +759,11 @@ function viewMore(v) {
     nCard.append(btns);
   }
   v.append(nCard);
+  // 대사 속도
+  const sp = h('div', { class: 'chips' });
+  Object.keys(SPEEDS).forEach(k => sp.append(h('button', { class: k === typeSpeed() ? 'on' : '', text: t('sp_' + k), onclick: e => {
+    localStorage.setItem('co.typeSpeed', k); sp.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === e.currentTarget)); } })));
+  v.append(h('div', { class: 'card' }, h('h2', { class: 'title', text: t('typeSpeed') }), sp));
   // 연결
   v.append(h('div', { class: 'card' }, h('h2', { class: 'title', text: t('conn') }),
     h('div', { class: 'kv' }, h('b', { text: t('pcAddr') }), h('span', { class: 'ell', text: conf.u || '-' })),

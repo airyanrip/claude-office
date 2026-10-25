@@ -638,14 +638,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if origin == self.remote.app_origin:
             self.send_header('Access-Control-Allow-Origin', origin)
             self.send_header('Vary', 'Origin')
-            self.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type')
+            self.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-If-Same')
+            self.send_header('Access-Control-Expose-Headers', 'X-Etag')
             self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
             self.send_header('Access-Control-Max-Age', '600')
 
     def _send(self, code, body, ctype='application/json; charset=utf-8', cache='no-store'):
+        etag = None
         if not isinstance(body, (bytes, bytearray)):
             body = json.dumps(body, ensure_ascii=False).encode()
+            if code == 200:  # 지난번과 내용이 같으면 짧은 '같음'만 보낸다 (휴대폰 데이터 절약; 304는 브라우저가 끊어 버려 쓰지 않음)
+                etag = hashlib.sha1(body).hexdigest()[:20]
+                if self.headers.get('X-If-Same') == etag:
+                    body = b'{"same":true}'
         self.send_response(code)
+        if etag:
+            self.send_header('X-Etag', etag)
         self._cors()
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(body)))
@@ -734,7 +742,7 @@ def api_state(r, dev, q, body):
                           'done': it['_key'] in app.sec_done,
                           'choices': [{'i': i, 'label': ch['label'], 'on': bool(ch.get('sid'))}
                                       for i, ch in enumerate(app.sec_choices(it))]})
-        return {'v': 1, 'lang': co.LANG, 'now': int(time.time()), 'sessions': out, 'chat_ver': chat_ver,
+        return {'v': 1, 'lang': co.LANG, 'sessions': out, 'chat_ver': chat_ver,
                 'sec': {'sid': app.sec_sid, 'summary': _clip(sec.get('summary'), 600), 'updated': sec.get('updatedAt'),
                         'briefing': app.briefing(), 'items': items},
                 'meeting': _meeting(r), 'alerts': r.alerts[-10:]}
