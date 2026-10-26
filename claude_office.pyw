@@ -750,6 +750,9 @@ def strip_hint(text):
     return text[:min(cut)].rstrip() if cut else text
 
 
+SID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+
+
 def save_upload(sid, images):
     """휴대폰에서 올린 사진들을 세션톡 사진 폴더에 저장한다. images: [{'data': JPEG·PNG base64, 'preview': PNG base64(선택)}].
     PC 말풍선은 PNG만 그릴 수 있어 JPEG 옆에 작은 PNG(-p.png)를 둔다. 저장한 원본 경로 목록."""
@@ -3153,8 +3156,12 @@ class ChatWin:
             qa = {s.sid: [tuple(e) for e in s.qa] for s in live}
             modes = {s.sid: s.mode() for s in live}
         out, typing, used = [], {}, set()
+        by_name = {v: k for k, v in names.items()}
         for m in msgs:
             m = dict(m)
+            for k in ('from', 'to'):  # 세션 이름으로 보낸 메시지는 그 세션 방으로 (보낼 때 꺼져 있었으면 이름이 남는다)
+                if m[k] in by_name:
+                    m[k] = by_name[m[k]]
             if m['from'] == 'user':
                 m['text'] = strip_hint(m['text'])  # 세션에만 가는 사진 안내는 대화에 보이지 않게
             out.append(m)
@@ -3218,7 +3225,21 @@ class ChatWin:
         self.spin += 1
         if getattr(self, 'typing', None) and self.cv.winfo_ismapped():
             self._refresh_typing()
+        self._blink_rooms()
         self.win.after(160, self._spin_tick)
+
+    def _blink_rooms(self):
+        """방 목록: 일을 맡아 하는 중인 세션은 오른쪽 아래 •••이 깜빡인다."""
+        typing = getattr(self, 'typing', None) or {}
+        on = self.spin // 3 % 2 == 0
+        for r, w in self.room_rows.items():
+            bz = w.get('busy')
+            if not bz:
+                continue
+            bg = w['bgs'][0]['bg']
+            fg = (ACCENT if on else mix(bg, ACCENT, 0.3)) if r in typing else bg
+            if bz['bg'] != bg or bz['fg'] != fg:
+                bz.configure(bg=bg, fg=fg)
 
     def _refresh_typing(self):
         mon = self.app.mon
@@ -3278,7 +3299,7 @@ class ChatWin:
         rooms = ['*'] + [s.sid for s in live]
         for m in msgs:  # 꺼진 세션과 주고받은 기록도 방으로 남긴다
             for sid in (m['from'], m['to']):
-                if sid not in rooms and sid not in ('user', '*', 'all', T('전체')) and len(sid) > 20:
+                if sid not in rooms and SID_RE.fullmatch(sid):
                     rooms.append(sid)
         pins = [p for p in self.app.cfg.get('chat_pins') or [] if p in rooms]  # 고정한 세션은 전체 대화 바로 아래
         rooms = ['*'] + pins + [r for r in rooms[1:] if r not in pins]
@@ -3332,7 +3353,7 @@ class ChatWin:
             w['prev'].configure(text=fit(prev or T('아직 대화 없음'), F['small'], int(280 * self.app.Z) - 130))
             if unread:
                 w['badge'].configure(text=str(unread))
-                w['badge'].pack(side='right')
+                w['badge'].pack(side='right', before=w['busy'])
             else:
                 w['badge'].pack_forget()
 
@@ -3370,11 +3391,14 @@ class ChatWin:
         prev = tk.Label(bot, text='', font=F['small'], bg=CARD, fg=DIM, anchor='w')
         prev.pack(side='left')
         badge = tk.Label(bot, text='', font=F['tiny'], bg=RED, fg='#ffffff', padx=6)
+        busy = tk.Label(bot, text='•••', font=F['bodyb'], bg=CARD, fg=CARD)  # 일하는 중이면 깜빡인다
+        busy.pack(side='right')
         bgs = [f, tx, top, bot, when, name, prev] + ([ic] if r == '*' else [])
         for wd in bgs + [ic, badge]:
             wd.bind('<Button-1>', lambda e, r=r: self.set_room(r))
             wd.bind('<MouseWheel>', lambda e: self.rooms_cv.yview_scroll(int(-e.delta / 120), 'units'))
-        return {'bgs': bgs, 'when': when, 'name': name, 'prev': prev, 'badge': badge, 'pin': pin, 'bar': bar}
+        busy.bind('<Button-1>', lambda e, r=r: self.set_room(r))
+        return {'bgs': bgs, 'when': when, 'name': name, 'prev': prev, 'badge': badge, 'pin': pin, 'bar': bar, 'busy': busy}
 
     def toggle_pin(self, sid):
         pins = [p for p in self.app.cfg.get('chat_pins') or [] if p != sid]
