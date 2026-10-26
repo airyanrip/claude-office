@@ -726,6 +726,7 @@ def clean_empty_sessions(live, min_age=600, peer_age=3600):
 TALK_IMG_DIR = os.path.join(COLLAB, 'talk')     # 세션톡에 보여 줄 사진을 세션이 저장하는 곳
 IMG_WANT = re.compile(r'캡처|캡쳐|스크린\s*샷|사진|이미지|화면을?\s*(보여|보내|찍)|screen\s*shot|capture|image|picture|photo|'
                       r'スクショ|キャプチャ|画像|写真|截图|截屏|图片|照片', re.I)
+CAPTURE_WANT = re.compile(r'캡처|캡쳐|스크린\s*샷|screen\s*shot|capture|スクショ|キャプチャ|截图|截屏', re.I)  # 사진을 붙여 보낼 때는 이것만 캡처 요청으로
 IMG_HINT = T('[세션톡 사진 안내] 사진을 보여 줄 때는 PNG로 {0} 폴더에 저장하고, 답에 ![설명](파일 전체 경로) 한 줄로 적으세요. '
              '화면 캡처: powershell -ExecutionPolicy Bypass -File "{1}" -Out "{0}\\이름.png" -Title "창 제목 일부" (-Title을 빼면 전체 화면).')
 

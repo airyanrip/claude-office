@@ -1148,6 +1148,8 @@ def api_send(r, dev, q, body):
             raise ValueError('session is off')
         extra = r.co.talk_text(sid, text)[len(text):]
         shown = text
+        if images and not r.co.CAPTURE_WANT.search(text):  # "이 사진 봐 줘"의 '사진'은 캡처 요청이 아니다
+            extra = ''
         if images:
             shown, note = r.co.upload_text(text, r.co.save_upload(sid, images))
             extra = note + extra
