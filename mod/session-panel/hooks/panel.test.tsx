@@ -292,3 +292,52 @@ test('데스크탑 앱 세션은 상태 파일에 surface를 적는다 (세션 �
   await clock.advance(4000)
   expect(JSON.parse(files.get(`${DIR}\\peer-sess-a.json`) ?? '{}')).toMatchObject({ sessionId: 'sess-a', surface: 'desktop' })
 })
+
+test('세션 사무실이 모델을 바꾸라고 적으면 /model 을 한 번 돌리고, 지금 모델을 상태 파일에 적는다', async ($, on) => {
+  const clock = mock.clock(on)
+  const { files } = world(on)
+  let model = 'claude-sonnet-5-5'
+  const runs: string[] = []
+  on('session.model', async () => ({ value: model }))
+  on('command.run', { command: 'model' }, async (_$, e) => {
+    runs.push(e.args)
+    model = e.args
+    return { text: `Set model to ${e.args}` }
+  })
+  await clock.set(1_000_000)
+  await $.session.start({ cwd: 'C:/work/server', surface: null, isInteractive: true })
+  await clock.advance(4000)
+  expect(JSON.parse(files.get(`${DIR}\\peer-sess-a.json`) ?? '{}')).toMatchObject({ model: 'claude-sonnet-5-5' })
+
+  files.set(`${DIR}\\model-sess-a.json`, JSON.stringify({ id: 'r1', model: 'claude-opus-5-5' }))
+  await clock.advance(4000)
+  await clock.advance(4000)
+  expect(runs).toEqual(['claude-opus-5-5'])
+  expect(JSON.parse(files.get(`${DIR}\\model-sess-a.json`) ?? '{}')).toMatchObject({ id: 'r1', done: true })
+  expect(JSON.parse(files.get(`${DIR}\\peer-sess-a.json`) ?? '{}')).toMatchObject({ model: 'claude-opus-5-5' })
+})
+
+test('모델 예약 시각이 지나면 모든 세션이 한 번 그 모델로 바꾼다', async ($, on) => {
+  const clock = mock.clock(on)
+  const { files } = world(on)
+  let model = 'claude-opus-5-5'
+  const runs: string[] = []
+  on('session.model', async () => ({ value: model }))
+  on('command.run', { command: 'model' }, async (_$, e) => {
+    runs.push(e.args)
+    model = e.args
+    return { text: `Set model to ${e.args}` }
+  })
+  await clock.set(1_000_000)
+  files.set(`${DIR}\\model-plan.json`, JSON.stringify({ id: 'p1', at: 1_010_000, model: 'claude-sonnet-5-5' }))
+  await $.session.start({ cwd: 'C:/work/server', surface: null, isInteractive: true })
+  await clock.advance(4000)
+  expect(runs).toEqual([])
+  await clock.advance(8000)
+  await clock.advance(4000)
+  expect(runs).toEqual(['claude-sonnet-5-5'])
+  // 그 뒤에 사용자가 직접 다시 바꾸면 같은 예약으로 되돌리지 않는다
+  model = 'claude-opus-5-5'
+  await clock.advance(8000)
+  expect(runs).toEqual(['claude-sonnet-5-5'])
+})

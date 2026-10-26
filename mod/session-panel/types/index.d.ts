@@ -40,6 +40,8 @@ export type Peer = {
   updatedAt: number
   // 세션이 그려지는 곳 (terminal · desktop · vscode · mobile). 세션 사무실은 세션 목록 파일이 없는 데스크탑 앱 세션을 이것으로 찾는다
   surface?: string
+  // 지금 쓰는 모델 (/model 이 보여 주는 이름). 세션 사무실이 보여 준다
+  model?: string
 }
 
 // 협업 폴더의 out-<세션>.json: 각 세션이 보낸 메시지 (그 세션만 쓴다)
@@ -97,6 +99,7 @@ declare module 'claude-code' {
       tabTitle: string
       root: string
       startedAt: number
+      modelPlans: string[]
       now: number
       peers: Peer[]
       messages: MessageLine[]

@@ -38,6 +38,8 @@ const label = atom({ plugin: 'session-panel', key: 'label' } as const, '')
 const tabTitle = atom({ plugin: 'session-panel', key: 'tabTitle' } as const, '')
 const root = atom({ plugin: 'session-panel', key: 'root' } as const, '')
 const startedAt = atom({ plugin: 'session-panel', key: 'startedAt' } as const, 0)
+// 이 세션에서 이미 따른 모델 예약(model-plan.json)의 id
+const modelPlans = atom({ plugin: 'session-panel', key: 'modelPlans' } as const, [])
 const now = atom({ plugin: 'session-panel', key: 'now' } as const, 0)
 const peers = atom({ plugin: 'session-panel', key: 'peers' } as const, [])
 const messages = atom({ plugin: 'session-panel', key: 'messages' } as const, [])
@@ -340,8 +342,39 @@ const writePeer = async ($: EngineInterface): Promise<void> => {
     activity: current.note || (await read($, activity)),
     updatedAt: await $.clock.now(),
     ...(surfaceNow ? { surface: surfaceNow } : {}),
+    model: await $.session.model().catch(() => ''),
   }
   await $.fs.write(`${dir}/peer-${me}.json`, JSON.stringify(peer))
+}
+
+// 세션 사무실이 모델을 바꾸라고 적는 파일: 이 세션만 model-<세션 id>.json { id, model, done? },
+// 모든 세션에 정한 시각부터 model-plan.json { id, at, model } (그 뒤에 켠 세션도 따른다).
+// /model 은 세션이 쉴 때 돌므로, 작업 중이면 끝난 뒤에 바뀐다.
+type ModelRequest = { id: string; model: string; at?: number; done?: boolean; result?: string }
+let modelAsked = ''
+const switchModel = async ($: EngineInterface, model: string): Promise<string> => {
+  const run = await $.command.run({ command: 'model', args: model }).catch((err) => ({ text: `error: ${String(err)}` }))
+  await writePeer($).catch(() => {})
+  return firstLine(run.text ?? '', 200)
+}
+const applyModel = async ($: EngineInterface): Promise<void> => {
+  const dir = await collabDir($)
+  const path = `${dir}/model-${await mySession($)}.json`
+  const req = await readJson<ModelRequest>($, path)
+  if (req && !req.done && req.model && req.id !== modelAsked) {
+    modelAsked = req.id
+    const result = await switchModel($, req.model)
+    await $.fs.write(path, JSON.stringify({ ...req, done: true, result })).catch(() => {})
+    return
+  }
+  const plan = await readJson<ModelRequest>($, `${dir}/model-plan.json`)
+  if (!plan?.id || !plan.model || !(Number(plan.at) <= (await $.clock.now())) || (await read($, modelPlans)).includes(plan.id)) {
+    return
+  }
+  await update($, modelPlans, ids => [...ids, plan.id].slice(-20))
+  if ((await $.session.model().catch(() => '')) !== plan.model) {
+    await switchModel($, plan.model)
+  }
 }
 
 const framed = (m: Message, from?: Peer): string =>
@@ -408,6 +441,7 @@ const sync = async ($: EngineInterface): Promise<void> => {
     await writeDiag($).catch(() => {})
   }
   await writePeer($)
+  void applyModel($).catch(() => {})
   const dir = await collabDir($)
   const me = await mySession($)
   const mine = await myLabel($)

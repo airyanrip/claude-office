@@ -271,10 +271,93 @@ def install_mod():
         if not linked:
             env[MOD_ENV] = os.pathsep.join(cur + [MOD_DIR])
         env[MOD_WATCH] = '1'  # 데스크탑 앱(Code 탭) 세션도 mod를 고치면 다시 켜지 않고 바로 다시 불러온다
-        tmp = CLAUDE_SETTINGS + '.tmp'
-        with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, CLAUDE_SETTINGS)
+        _save_claude_settings(cfg)
+
+
+def _save_claude_settings(cfg):
+    tmp = CLAUDE_SETTINGS + '.tmp'
+    with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, CLAUDE_SETTINGS)
+
+
+# ── 모델: 세션마다 쓰는 모델은 mod가 상태 파일(model)에 적고, 바꾸라는 요청은 협업 폴더 파일로 전한다 ──
+MODELS = (('claude-opus-5-5', 'Opus 5.5'), ('claude-sonnet-5-5', 'Sonnet 5.5'), ('claude-haiku-5-5', 'Haiku 5.5'),
+          ('claude-fable-5-1', 'Fable 5.1'))
+
+
+def model_name(m):
+    """'claude-opus-5-5[1m]' → 'Opus 5.5', 'sonnet' → 'Sonnet'. 모르는 이름은 그대로."""
+    m = (m or '').strip()
+    base = m.split('[')[0]
+    for mid, name in MODELS:
+        if base == mid:
+            return name
+    mm = re.fullmatch(r'claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?', base)
+    if mm:
+        return f'{mm.group(1).title()} {mm.group(2)}' + (f'.{mm.group(3)}' if mm.group(3) else '')
+    return base.title() if base in ('opus', 'sonnet', 'haiku', 'fable') else m
+
+
+def default_model():
+    """새로 켜는 세션의 모델 (~/.claude/settings.json 의 model, 없으면 '')."""
+    return str((_claude_settings() or {}).get('model') or '')
+
+
+def set_default_model(model):
+    """settings.json 의 model 칸만 고친다 (빈 값이면 지움). 고치기 전 사본은 settings.json.office-backup."""
+    cfg = _claude_settings()
+    if cfg is None:
+        raise ValueError(T('~/.claude/settings.json을 읽을 수 없어요'))
+    if str(cfg.get('model') or '') == model:
+        return
+    if os.path.exists(CLAUDE_SETTINGS):
+        shutil.copy2(CLAUDE_SETTINGS, CLAUDE_SETTINGS + '.office-backup')
+    if model:
+        cfg['model'] = model
+    else:
+        cfg.pop('model', None)
+    _save_claude_settings(cfg)
+
+
+def clock_ts(text):
+    """'10:00' · '9시' · '21:30' → 다음에 오는 그 시각(오늘, 지났으면 내일)의 time.time() 값. 못 읽으면 None."""
+    mm = re.fullmatch(r'\s*(\d{1,2})\s*(?:[:시]\s*(\d{1,2})?\s*분?)?\s*', text or '')
+    if not mm or int(mm.group(1)) > 23 or int(mm.group(2) or 0) > 59:
+        return None
+    now = datetime.datetime.now()
+    t = now.replace(hour=int(mm.group(1)), minute=int(mm.group(2) or 0), second=0, microsecond=0)
+    if t <= now:
+        t += datetime.timedelta(days=1)
+    return t.timestamp()
+
+
+def request_model(sid, model):
+    """그 세션의 mod가 쉴 때 /model 로 바꾼다 (작업 중이면 끝난 뒤)."""
+    write_json(os.path.join(COLLAB, f'model-{sid}.json'), {'id': uuid.uuid4().hex[:12], 'model': model, 'at': int(time.time() * 1000)})
+
+
+def model_pending(sid):
+    """아직 바뀌지 않은 모델 요청 (없으면 '')."""
+    d = read_json(os.path.join(COLLAB, f'model-{sid}.json'))
+    return str(d.get('model') or '') if isinstance(d, dict) and not d.get('done') else ''
+
+
+def model_plan():
+    """예약: {'id', 'at'(ms), 'model'} — 그 시각이 지나면 모든 세션(그 뒤에 켠 세션도)의 mod가 그 모델로 바꾼다."""
+    d = read_json(os.path.join(COLLAB, 'model-plan.json'))
+    return d if isinstance(d, dict) and d.get('model') and isinstance(d.get('at'), (int, float)) else None
+
+
+def set_model_plan(at, model):
+    path = os.path.join(COLLAB, 'model-plan.json')
+    if at is None:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return
+    write_json(path, {'id': uuid.uuid4().hex[:12], 'at': int(at * 1000), 'model': model})
 
 
 def write_json(path, data):
@@ -6126,6 +6209,7 @@ class App:
             root.after(4000, self._maybe_mod)  # 이미 쓰던 PC: 더 새 mod가 들어 있으면 업데이트를 권한다
             root.after(MOD_STALE * 1000 + 15_000, self.offer_mod_restart)  # mod 없이 켜진 세션이 있으면 다시 켜기를 권한다
         root.after(20_000, self._clean_loop)
+        root.after(10_000, self._model_tick)
         _APP[:] = [self]
 
     def _clean_loop(self):
@@ -6574,6 +6658,7 @@ class App:
                   T('켬') if self.topmost.get() else T('끔'), 0),
                  ('play', T('움직임'), lambda: self.anim_on.set(not self.anim_on.get()), T('켬') if self.anim_on.get() else T('끔'), 0),
                  ('type', T('대사 속도'), self.cycle_type_speed, TYPE_SPEED_TEXT[self.type_speed()], 0),
+                 ('spark', T('모델'), lambda: (self.toggle_menu(False), self.model_dialog()), model_name(default_model()), 0),
                  ('plug', T('세션 연결 mod'), lambda: (self.toggle_menu(False), self.mod_dialog()),
                   {'ok': T('켬'), 'old': T('업데이트')}.get(mod_state(), T('끔')), 0),
                  ('window', T('창으로 열기'), self.toggle_popup, T('켬') if self.popup.get() else T('끔'), 0),
@@ -6948,6 +7033,8 @@ class App:
             v = tk.Label(grid, text='-', font=F['body'], bg=CARD, fg=FG, anchor='w', justify='left')
             v.grid(row=r * 2 + 1, column=col, columnspan=span, sticky='w', pady=(0, 4), padx=(0, 16))
             self.p_info[key] = v
+        self.p_info[T('모델')].configure(cursor='hand2', fg='#82b4ff')
+        self.p_info[T('모델')].bind('<Button-1>', self.model_menu)
         v = self.p_info[T('대화 기록')]
         v.configure(cursor='hand2', fg='#82b4ff')
         v.bind('<Button-1>', lambda e: self.p_path and open_folder(self.p_path, select=True))
@@ -8353,6 +8440,149 @@ class App:
         self.toast(T('session-panel mod를 설치했어요 · 새로 켜는 세션부터 적용돼요'))
         self.root.after(1500, lambda: self.offer_mod_restart(force=True))
 
+    # ── 모델 ──
+    def model_menu(self, e):
+        """자세히 보기의 모델 칸: 이 세션만 바꾸기, 또는 모든 세션·예약 창."""
+        sid = self.sel
+        m = tk.Menu(self.root, tearoff=0, font=self.fonts['small'])
+        for mid, name in MODELS:
+            m.add_command(label=T('이 세션만 {0}(으)로').format(name), command=lambda mid=mid: self.set_session_model(sid, mid))
+        m.add_separator()
+        m.add_command(label=T('모든 세션 · 예약…'), command=self.model_dialog)
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
+
+    def _model_targets(self):
+        """[(sid, 이름, 지금 모델, mod 있음)] — mod 상태 파일에 모델이 적힌 세션만 바꿀 수 있다."""
+        with self.mon.lock:
+            return [(s.sid, self.mon.display_name(s), s.peer.get('model') or s.acc.model, bool(s.peer.get('model')))
+                    for s in self.sort_sessions(self.mon.sessions.values())]
+
+    def set_session_model(self, sid, model):
+        row = next((x for x in self._model_targets() if x[0] == sid), None)
+        if not row or not row[3]:
+            self.toast(T('mod가 없는 세션은 모델을 바꿀 수 없어요'), warn=True)
+            return
+        request_model(sid, model)
+        self.toast(T('{0} → {1} · 작업 중이면 끝난 뒤에 바뀌어요').format(clean(row[1], 24), model_name(model)))
+        if sid == self.sel:
+            self.update_panel()
+
+    def apply_models(self, model, until=None, back=''):
+        """모든 세션과 새로 켤 세션의 모델을 바꾼다. until(시각)을 주면 그때 back 모델로 되돌리는 예약을 남긴다."""
+        n = skipped = 0
+        for sid, _name, cur, has_mod in self._model_targets():
+            if not has_mod:
+                skipped += 1
+            elif cur.split('[')[0] != model:
+                request_model(sid, model)
+                n += 1
+        try:
+            set_default_model(model)
+        except (OSError, ValueError) as ex:
+            self.toast(T('새 세션 기본 모델을 저장하지 못했어요: {0}').format(ex), warn=True)
+        if until:
+            set_model_plan(until, back)
+        else:
+            set_model_plan(None, '')
+        msg = T('모델을 {0}(으)로 · 바꿀 세션 {1}개 (작업 중이면 끝난 뒤)').format(model_name(model), n)
+        if skipped:
+            msg += ' · ' + T('mod 없는 세션 {0}개는 그대로').format(skipped)
+        if until:
+            msg += ' · ' + T('{0}에 {1}(으)로 되돌려요').format(time.strftime('%H:%M', time.localtime(until)), model_name(back))
+        self.toast(msg)
+
+    def _model_tick(self):
+        """예약 시각이 지나면 새 세션 기본 모델도 바꾸고 예약을 지운다 (켜져 있는 세션은 mod가 직접 바꾼다)."""
+        try:
+            plan = model_plan()
+            if plan and plan['at'] / 1000 <= time.time() - 60:  # 1분 기다려 켜진 세션들이 모두 예약을 읽은 뒤
+                set_default_model(plan['model'])
+                set_model_plan(None, '')
+                self.toast(T('예약한 대로 모델을 {0}(으)로 바꿨어요').format(model_name(plan['model'])))
+        except (OSError, ValueError) as ex:
+            print('model plan', ex, file=sys.stderr)
+        self.root.after(30_000, self._model_tick)
+
+    def model_dialog(self):
+        """세션마다 쓰는 모델을 보고, 모든 세션을 한꺼번에 바꾸거나 정한 시각에 되돌리는 예약을 건다."""
+        F, Z = self.fonts, self.Z
+        d = self.model_win = tk.Toplevel(self.root)
+        d.title(T('사용 모델'))
+        d.configure(bg=CARD)
+        d.resizable(False, False)
+        d.transient(self.root)
+        body = tk.Frame(d, bg=CARD, padx=24, pady=18)
+        body.pack(fill='both')
+        tk.Label(body, text=T('사용 모델'), font=F['h2'], bg=CARD, fg=FG, anchor='w').pack(fill='x')
+        tk.Label(body, text=T('작업 중인 세션은 하던 일이 끝난 뒤에 바뀌어요.'), font=F['small'], bg=CARD, fg=DIM, anchor='w').pack(fill='x', pady=(2, 10))
+        lst = tk.Frame(body, bg=CARD2, padx=12, pady=8)
+        lst.pack(fill='x')
+        for sid, name, cur, has_mod in self._model_targets():
+            r = tk.Frame(lst, bg=CARD2)
+            r.pack(fill='x', pady=1)
+            tk.Label(r, text=fit(name, F['body'], int(220 * Z)), font=F['body'], bg=CARD2, fg=FG, anchor='w').pack(side='left')
+            want = model_pending(sid)
+            txt = ((model_name(cur) or '-') + (f' → {model_name(want)}' if want and want != cur else '')) if has_mod else T('mod 없음 · 바꿀 수 없음')
+            tk.Label(r, text=txt, font=F['small'], bg=CARD2, fg=TEXT2 if has_mod else DIM, anchor='e').pack(side='right', padx=(16, 0))
+        tk.Label(body, text=T('새로 켜는 세션: {0}').format(model_name(default_model()) or T('기본값')), font=F['small'], bg=CARD, fg=TEXT2,
+                 anchor='w').pack(fill='x', pady=(6, 12))
+        tk.Label(body, text=T('모든 세션을 이 모델로'), font=F['bodyb'], bg=CARD, fg=FG, anchor='w').pack(fill='x')
+        pick = tk.StringVar(value=MODELS[0][0])
+        row = tk.Frame(body, bg=CARD)
+        row.pack(fill='x', pady=(4, 10))
+        for mid, name in MODELS:
+            tk.Radiobutton(row, text=name, value=mid, variable=pick, font=F['body'], bg=CARD, fg=FG, selectcolor=CARD2,
+                           activebackground=CARD, activeforeground=FG, highlightthickness=0).pack(side='left', padx=(0, 10))
+        plan = model_plan()
+        until_on = tk.BooleanVar(value=bool(plan))
+        urow = tk.Frame(body, bg=CARD)
+        urow.pack(fill='x')
+        tk.Checkbutton(urow, text=T('이 시각에 되돌리기'), variable=until_on, font=F['body'], bg=CARD, fg=FG, selectcolor=CARD2,
+                       activebackground=CARD, activeforeground=FG, highlightthickness=0).pack(side='left')
+        hhmm = tk.Entry(urow, font=F['body'], width=6, bg=CARD2, fg=FG, relief='flat', highlightthickness=1, highlightbackground=EDGE,
+                        highlightcolor=ACCENT, insertbackground=FG, justify='center')
+        hhmm.insert(0, time.strftime('%H:%M', time.localtime(plan['at'] / 1000)) if plan else '10:00')
+        hhmm.pack(side='left', padx=6, ipady=2)
+        names = dict(MODELS)
+        back = tk.StringVar(value=names.get(plan['model'], MODELS[1][1]) if plan else MODELS[1][1])
+        om = tk.OptionMenu(urow, back, *names.values())
+        om.configure(font=F['body'], bg=CARD2, fg=FG, activebackground=HOVER, activeforeground=FG, relief='flat', highlightthickness=0)
+        om.pack(side='left')
+        if plan:
+            tk.Label(body, text=T('예약: {0}에 {1}(으)로 되돌려요').format(time.strftime('%m-%d %H:%M', time.localtime(plan['at'] / 1000)),
+                                                              model_name(plan['model'])), font=F['small'], bg=CARD, fg=ACC_TEXT,
+                     anchor='w').pack(fill='x', pady=(6, 0))
+        err = tk.Label(body, text='', font=F['small'], bg=CARD, fg=RED, anchor='w')
+        err.pack(fill='x')
+
+        def ok():
+            until = None
+            if until_on.get():
+                until = clock_ts(hhmm.get())
+                if until is None:
+                    err.configure(text=T('시각은 10:00 처럼 적어 주세요'))
+                    return
+            d.destroy()
+            self.apply_models(pick.get(), until, next(mid for mid, n in MODELS if n == back.get()))
+
+        def cancel_plan():
+            set_model_plan(None, '')
+            d.destroy()
+            self.toast(T('모델 예약을 취소했어요'))
+
+        bar = tk.Frame(d, bg=CARD, padx=24)
+        bar.pack(fill='x', pady=(0, 18))
+        self._btn(bar, T('적용'), ok, bg=ACCENT, fg='#ffffff', hover=ACC_DARK).pack(side='right')
+        self._btn(bar, T('닫기'), d.destroy).pack(side='right', padx=8)
+        if plan:
+            self._btn(bar, T('예약 취소'), cancel_plan).pack(side='left')
+        d.update_idletasks()
+        d.geometry(f'+{self.root.winfo_rootx() + 120}+{self.root.winfo_rooty() + 120}')
+        d.grab_set()
+
     def stale_sessions(self):
         """mod 없이 켜진 세션 (mod를 설치하기 전부터 켜져 있던 터미널 세션): 켠 지 MOD_STALE초가 지났는데 mod 상태 파일이 없거나 멈춤."""
         now = time.time()
@@ -8521,7 +8751,9 @@ class App:
                                   else 'idle'] if fr else None}
         self.draw_head()
         self.p_info[T('시작')].configure(text=datetime.datetime.fromtimestamp(started).strftime(T('%m월 %d일 %H:%M')) if started else '-')
-        self.p_info[T('모델')].configure(text=acc.model or '-')
+        cur, want = peer.get('model') or acc.model, model_pending(sid)
+        self.p_info[T('모델')].configure(text=(model_name(cur) or '-') + (f' → {model_name(want)} ({T("작업이 끝나면")})' if want and want != cur else '')
+                                       + '  ▾')
         self.p_info[T('컨텍스트')].configure(text=T('{0} 토큰').format(fmt_n(acc.ctx)))
         self.p_path = tpath
         try:

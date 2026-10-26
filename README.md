@@ -125,7 +125,10 @@ new mod, so the app lists them and offers to restart them in a new terminal, con
   *Save as document* for an HTML file. *End meeting* when done.
 - **☰ Menu** – everything in one place: SessionTalk, suggestions, briefing, meeting room, remote control, launch
   session, avatar, new tab, storage (folder sizes + a *PC files* browser to find and copy any path), text size, always on top, animation, dialogue speed,
-  **Session mod** (install / update), open as window, dark theme, language.
+  **Models**, **Session mod** (install / update), open as window, dark theme, language.
+- **Models** – see which model each session uses (also on the details panel; click it to switch just that session), switch every
+  session plus new ones at once, and optionally switch back at a set time (e.g. Opus until 10:00, then Sonnet). Busy sessions switch
+  after their current task; needs the session mod.
 
 ### Phone remote control
 1. **☰ Menu → Remote control → Turn on remote.** The first time, press *Download* to get `cloudflared`
@@ -286,7 +289,9 @@ mod를 설치한 **뒤에** 켜는 Claude Code 세션부터 적용돼요. 이미
 - **회의실** – *회의 준비*에서 세션·범위(최근 N턴)·보고 방식을 고르고 **[회의 시작]**. 보고서가 오는 대로 발표하고, *발표 보기*로 다시 들어요.
   크게 보려면 *문서 크게 보기*, 파일로는 *자료로 저장*. 끝나면 *회의 끝내기*.
 - **☰ 메뉴** – 세션톡, 비서 제안, 브리핑, 회의실, 원격 조종, 세션 켜기, 아바타, 새 탭, 저장 공간(폴더 용량 + 경로를 찾아 복사하는 *PC 파일* 탐색기), 글자 크기, 항상 위,
-  움직임, 대사 속도, **세션 연결 mod**(설치·업데이트), 창으로 열기, 다크 테마, 언어를 한곳에서.
+  움직임, 대사 속도, **모델**, **세션 연결 mod**(설치·업데이트), 창으로 열기, 다크 테마, 언어를 한곳에서.
+- **모델** – 세션마다 쓰는 모델을 보고(자세히 보기에도 보이며, 누르면 그 세션만 바꿔요), 모든 세션과 새로 켤 세션을 한꺼번에 바꾸고,
+  정한 시각에 되돌리는 예약도 걸어요(예: 10시까지 Opus, 그 뒤 Sonnet). 작업 중인 세션은 하던 일이 끝난 뒤 바뀌어요. 세션 연결 mod가 필요해요.
 
 ### 휴대폰 원격 조종
 1. **☰ 메뉴 → 원격 조종 → [원격 켜기]**. 처음엔 *받기*를 눌러 `cloudflared`(Cloudflare 공식 배포, 약 55MB)를 앱 데이터 폴더에 받아요.

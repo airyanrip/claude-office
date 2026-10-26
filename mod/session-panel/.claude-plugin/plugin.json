@@ -1,1 +1,1 @@
-{ "name": "session-panel", "version": "0.4.0", "description": "진행 패널 + 세션 간 협업 + 세션 사무실(Claude Office) 연동", "types": "./types/index.d.ts" }
+{ "name": "session-panel", "version": "0.5.0", "description": "진행 패널 + 세션 간 협업 + 세션 사무실(Claude Office) 연동", "types": "./types/index.d.ts" }
