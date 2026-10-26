@@ -63,6 +63,9 @@ MOD_SRC = os.path.join(APP_DIR, 'mod', 'session-panel')     # 이 프로그램�
 MOD_DIR = os.path.join(CLAUDE, 'mods', 'session-panel')     # 설치할 곳
 CLAUDE_SETTINGS = os.path.join(CLAUDE, 'settings.json')
 MOD_ENV = 'CLAUDE_CODE_PLUGIN_DIRS'                         # Claude Code가 mod를 불러오는 폴더 목록
+MOD_WATCH = 'CLAUDE_CODE_PLUGIN_DIR_WATCH'                  # 데스크탑 앱 세션도 mod가 바뀌면 바로 다시 불러오게
+PEER_LIVE = 20                                              # mod 상태 파일이 이 초 안에 새로 적혔으면 살아 있는 세션
+MOD_STALE = 60                                              # 켠 지 이만큼 지났는데 mod 상태 파일이 없으면 mod 없이 켜진 세션
 
 
 def load_fonts():
@@ -236,7 +239,8 @@ def _claude_settings():
 
 
 def mod_state():
-    """session-panel mod: 'ok' / 'missing'(없음) / 'unlinked'(있지만 Claude Code가 불러오지 않음) / 'old'(이 프로그램에 든 것이 더 새것)."""
+    """session-panel mod: 'ok' / 'missing'(없음) / 'unlinked'(있지만 Claude Code가 불러오지 않음) / 'old'(이 프로그램에 든 것이 더 새것)
+    / 'nowatch'(데스크탑 앱 세션이 mod 변경을 바로 다시 불러오는 설정이 없음)."""
     if not os.path.isfile(os.path.join(MOD_DIR, 'hooks', 'register.tsx')):
         return 'missing'
     env = (_claude_settings() or {}).get('env') or {}
@@ -245,6 +249,8 @@ def mod_state():
         return 'unlinked'
     if os.path.isdir(MOD_SRC) and _mod_ver(MOD_SRC) > _mod_ver(MOD_DIR):
         return 'old'
+    if str(env.get(MOD_WATCH) or '') != '1':
+        return 'nowatch'
     return 'ok'
 
 
@@ -258,10 +264,13 @@ def install_mod():
     shutil.copytree(MOD_SRC, MOD_DIR, dirs_exist_ok=True, ignore=shutil.ignore_patterns('*.test.tsx'))
     env = cfg.setdefault('env', {})
     cur = [x for x in str(env.get(MOD_ENV) or '').split(os.pathsep) if x.strip()]
-    if not any(_same_path(x, MOD_DIR) for x in cur):
+    linked = any(_same_path(x, MOD_DIR) for x in cur)
+    if not linked or str(env.get(MOD_WATCH) or '') != '1':
         if os.path.exists(CLAUDE_SETTINGS):
             shutil.copy2(CLAUDE_SETTINGS, CLAUDE_SETTINGS + '.office-backup')
-        env[MOD_ENV] = os.pathsep.join(cur + [MOD_DIR])
+        if not linked:
+            env[MOD_ENV] = os.pathsep.join(cur + [MOD_DIR])
+        env[MOD_WATCH] = '1'  # 데스크탑 앱(Code 탭) 세션도 mod를 고치면 다시 켜지 않고 바로 다시 불러온다
         tmp = CLAUDE_SETTINGS + '.tmp'
         with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -1169,6 +1178,7 @@ class Monitor:
             if ps and str(ps).isdigit() and abs(int(ps) - st[0]) > 50_000_000:
                 continue  # pid 재사용
             live[d['sessionId']] = (d, st)
+        self._desktop_sessions(live, now)
 
         if self._changed(os.path.join(COLLAB, 'names.json')):
             self.names = read_json(os.path.join(COLLAB, 'names.json')) or {}
@@ -1194,7 +1204,7 @@ class Monitor:
                     s = self.sessions[sid] = Session(sid)
                     changed = True
                 before = (s.status, s.waiting, s.sess_name)
-                s.pid = int(d['pid'])
+                s.pid = int(d.get('pid') or 0)
                 s.cwd = d.get('cwd', '')
                 s.kind = d.get('kind', '')
                 s.status = d.get('status', 'idle')
@@ -1205,6 +1215,8 @@ class Monitor:
                 if before != (s.status, s.waiting, s.sess_name):
                     s.ver += 1
                     changed = True
+                if not st:  # 데스크탑 앱 세션: 프로세스를 모른다
+                    continue
                 cpu = st[1]
                 if s.cpu_prev is not None:
                     s.cpu = max(0.0, (cpu - s.cpu_prev) / (dt * 1e7 * self._ncpu) * 100)
@@ -1240,6 +1252,32 @@ class Monitor:
             with self.lock:
                 self.version += 1
         self.save_cache()
+
+    def _desktop_sessions(self, live, now):
+        """Claude 데스크탑 앱(Code 탭)에서 켠 세션: 세션 목록 파일(~/.claude/sessions)에 없을 수 있어서
+        session-panel mod가 4초마다 적는 상태 파일(peer-<세션>.json, surface가 terminal이 아닌 것)로 찾는다."""
+        try:
+            names = os.listdir(COLLAB)
+        except OSError:
+            return
+        for fn in names:
+            if not (fn.startswith('peer-') and fn.endswith('.json')):
+                continue
+            sid = fn[5:-5]
+            if sid in live:
+                continue
+            p = os.path.join(COLLAB, fn)
+            try:
+                if now - os.path.getmtime(p) > PEER_LIVE:
+                    continue
+            except OSError:
+                continue
+            d = read_json(p)
+            if not isinstance(d, dict) or d.get('surface') in (None, '', 'terminal'):
+                continue
+            busy = d.get('phase') == 'working'
+            live[sid] = ({'sessionId': sid, 'pid': 0, 'cwd': d.get('root') or '', 'kind': 'desktop',
+                          'status': 'busy' if busy else 'idle'}, None)
 
     def _transcript_path(self, s):
         p = os.path.join(PROJ, re.sub(r'[^A-Za-z0-9]', '-', s.cwd), s.sid + '.jsonl')
@@ -5967,6 +6005,7 @@ class App:
         self.remote = None  # 원격 조종 (켤 때 만든다)
         self.chat_seen = self.cfg.get('chat_seen') or time.time()
         self.pending = {}           # 이 창에서 켠 세션 id → (켠 시각, 이름) — 출근하면 골라 준다
+        self.mod_restart = {}       # mod를 적용하려고 다시 켤 세션 id → 요청 시각 (일하는 중이면 끝날 때까지 기다림)
         self.menu_open, self.menu_hover, self.menu_boxes, self.menu_off = False, None, [], 0
         self.side_hover, self.side_sig = None, None
         self.toast_w = None
@@ -6060,6 +6099,7 @@ class App:
             root.after(3000, self._maybe_onboard)  # 첫 폴링으로 비서 세션이 이미 있는지 본 뒤
         else:
             root.after(4000, self._maybe_mod)  # 이미 쓰던 PC: 더 새 mod가 들어 있으면 업데이트를 권한다
+            root.after(MOD_STALE * 1000 + 15_000, self.offer_mod_restart)  # mod 없이 켜진 세션이 있으면 다시 켜기를 권한다
         root.after(20_000, self._clean_loop)
         _APP[:] = [self]
 
@@ -7966,16 +8006,22 @@ class App:
         chs = it.get('choices') if isinstance(it.get('choices'), list) else []
         for ch in chs[:3]:
             if isinstance(ch, dict) and (ch.get('prompt') or it.get('prompt')):
+                # 선택지에 대상이 따로 있으면 그 대상의 id만 (없으면 이름으로), 없으면 제안의 대상
+                own = ch.get('target') or ch.get('targetSessionId')
                 out.append({'label': one_line(ch.get('label') or T('요청하기'), 12), 'prompt': ch.get('prompt') or it['prompt'],
-                            'target': one_line(ch.get('target') or it.get('target') or '', 40)})
+                            'target': one_line(ch.get('target') or it.get('target') or '', 40),
+                            'tsid': str((ch.get('targetSessionId') if own else it.get('targetSessionId')) or '')})
         if not out and it.get('prompt'):
-            out.append({'label': T('요청하기'), 'prompt': it['prompt'], 'target': one_line(it.get('target') or '', 40)})
-        out = [ch for ch in out if ch['target']]
+            out.append({'label': T('요청하기'), 'prompt': it['prompt'], 'target': one_line(it.get('target') or '', 40),
+                        'tsid': str(it.get('targetSessionId') or '')})
+        out = [ch for ch in out if ch['target'] or ch['tsid']]
         with self.mon.lock:
             for ch in out:
-                dst = self.mon._resolve(ch['target'])
+                # 세션 이름이 겹치거나 비는 때가 있어 비서가 적은 세션 id(targetSessionId)로 먼저 찾고, 없을 때만 이름으로
+                dst = self.mon.sessions.get(ch['tsid']) or self.mon._resolve(ch['target'])
                 ch['sid'] = dst.sid if dst else None
-                ch['name'] = self.mon.display_name(dst) if dst else ch['target']
+                ch['name'] = self.mon.display_name(dst) if dst else (ch['target'] or ch['tsid'][:8])
+                ch['target'] = ch['target'] or ch['name']
         return out
 
     def send_choice(self, it, ch):
@@ -8254,10 +8300,14 @@ class App:
         """session-panel mod 설치·업데이트. 세션톡·휴대폰 명령 배달과 진행도 표시에 필요하다."""
         st = mod_state()
         if st == 'ok':
-            tkmsg.showinfo(T('세션 연결 mod'), T('session-panel mod가 설치되어 켜져 있어요.'), parent=self.root)
+            if not self.offer_mod_restart(force=True):
+                tkmsg.showinfo(T('세션 연결 mod'), T('session-panel mod가 설치되어 켜져 있어요.'), parent=self.root)
             return
         text = (T('이 프로그램에 든 session-panel mod가 설치된 것보다 새것이에요. 업데이트할까요?\n새로 켜는 Claude Code 세션부터 적용돼요.')
                 if st == 'old' else
+                T('Claude 데스크탑 앱(Code 탭)에서 켠 세션도 mod가 바뀌면 다시 켜지 않고 바로 다시 불러오게 설정을 하나 더할까요?\n'
+                  '(~/.claude/settings.json 의 env 에 CLAUDE_CODE_PLUGIN_DIR_WATCH=1 · 원래 파일은 settings.json.office-backup 으로 남겨요)')
+                if st == 'nowatch' else
                 T('세션톡·휴대폰에서 보낸 명령을 세션에 전하고 진행도를 보여 주는 session-panel mod가 이 PC에서 켜져 있지 않아요.\n\n'
                   '설치하면:\n· ~/.claude/mods/session-panel 에 mod를 복사해요\n'
                   '· ~/.claude/settings.json 에 불러오기 설정을 더해요 (원래 파일은 settings.json.office-backup 으로 남겨요)\n\n'
@@ -8276,6 +8326,82 @@ class App:
             tkmsg.showerror(T('세션 연결 mod'), T('mod를 설치하지 못했어요: {0}\nREADME의 수동 설치 방법을 참고하세요.').format(ex), parent=self.root)
             return
         self.toast(T('session-panel mod를 설치했어요 · 새로 켜는 세션부터 적용돼요'))
+        self.root.after(1500, lambda: self.offer_mod_restart(force=True))
+
+    def stale_sessions(self):
+        """mod 없이 켜진 세션 (mod를 설치하기 전부터 켜져 있던 터미널 세션): 켠 지 MOD_STALE초가 지났는데 mod 상태 파일이 없거나 멈춤."""
+        now = time.time()
+        out = []
+        with self.mon.lock:
+            items = [(sid, s.kind, s.started, s.pid, self.mon.display_name(s)) for sid, s in self.mon.sessions.items()]
+        for sid, kind, started, pid, name in items:
+            if kind != 'interactive' or not pid or sid in self.mod_restart or now - started < MOD_STALE:  # 터미널 세션만 (claude -p·데스크탑 제외)
+                continue
+            try:
+                fresh = now - os.path.getmtime(os.path.join(COLLAB, f'peer-{sid}.json')) < MOD_STALE
+            except OSError:
+                fresh = False
+            if not fresh:
+                out.append((sid, name))
+        return out
+
+    def offer_mod_restart(self, force=False):
+        """mod 없이 켜진 세션이 있으면, 대화를 그대로 이어서(--resume) 다시 켜 mod를 적용할지 묻는다.
+        실행 중인 세션은 mod를 새로 불러올 수 없어서 다시 켜야 한다. 물어본 세션은 다시 묻지 않는다(force면 다시). 물었으면 True."""
+        if mod_state() not in ('ok', 'nowatch'):
+            return False
+        asked = set(self.cfg.get('mod_restart_asked') or [])
+        stale = [x for x in self.stale_sessions() if force or x[0] not in asked]
+        if not stale:
+            return False
+        self.cfg['mod_restart_asked'] = sorted(asked | {sid for sid, _n in stale})[-200:]
+        self.save_cfg()
+        names = '\n'.join('· ' + clean(n, 40) for _sid, n in stale[:12]) + ('\n…' if len(stale) > 12 else '')
+        if not tkmsg.askyesno(T('세션 연결 mod'), T('session-panel mod 없이 켜져 있는 세션이 {0}개 있어요 (mod를 설치하기 전에 켠 세션).\n{1}\n\n'
+                                                   '이런 세션은 세션톡·휴대폰 명령을 받지 못하고 진행도도 안 보여요. 켜져 있는 세션은 mod를 새로 불러올 수 없어서, '
+                                                   '대화를 그대로 이어서(--resume) 새 터미널 창으로 다시 켜야 해요.\n'
+                                                   '· 쉬는 세션은 바로, 일하는 세션은 일이 끝나면 다시 켜요\n· 원래 터미널 창(탭)은 닫혀요\n\n지금 다시 켤까요?')
+                              .format(len(stale), names), parent=self.root):
+            return True
+        for sid, _n in stale:
+            self.mod_restart[sid] = time.time()
+        self._mod_restart_tick()
+        return True
+
+    def _mod_restart_tick(self):
+        """다시 켜기를 기다리는 세션: 쉬고 있으면 끄고 같은 폴더에서 claude --resume 으로 다시 켠다."""
+        for sid in list(self.mod_restart):
+            with self.mon.lock:
+                s = self.mon.sessions.get(sid)
+                info = (s.mode(), s.pid, s.cwd, self.mon.display_name(s)) if s else None
+            if not info:  # 그 사이 사용자가 껐다
+                del self.mod_restart[sid]
+                continue
+            mode, pid, cwd, name = info
+            if mode in ('busy', 'wait') or not pid or not os.path.isdir(cwd):
+                continue
+            del self.mod_restart[sid]
+            try:
+                subprocess.run(['taskkill', '/PID', str(pid), '/T', '/F'], capture_output=True, timeout=15,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            except (OSError, subprocess.SubprocessError) as ex:
+                print('mod restart kill error', ex, file=sys.stderr)
+                continue
+            self._relaunch_when_gone(sid, pid, cwd, name, time.time())
+        if self.mod_restart:
+            self.root.after(5000, self._mod_restart_tick)
+
+    def _relaunch_when_gone(self, sid, pid, cwd, name, t0):
+        if proc_stat(pid) and time.time() - t0 < 20:
+            self.root.after(500, lambda: self._relaunch_when_gone(sid, pid, cwd, name, t0))
+            return
+        try:
+            launch_claude(cwd, ['--resume', sid])
+        except OSError as ex:
+            tkmsg.showerror(T('세션을 켜지 못했어요'), f'{claude_exe()}\n{ex}')
+            return
+        self.pending[sid] = (time.time(), name)
+        self.toast(T('{0} 다시 켜는 중… 새 터미널 창을 확인하세요').format(clean(name, 30)))
 
     # ── 세션 이름 바꾸기 ──
     def rename_click(self):
@@ -8354,7 +8480,7 @@ class App:
             sid = s.sid
             qa_key = (sid, s.qa_ver, mode, s.qa_loading)
             qa = [list(e) for e in s.qa] if qa_key != self.qa_ver else None
-        self.p_info[T('프로세스')].configure(text=f'PID {pid} · {mem / 1048576:.0f}MB · CPU {cpu:.1f}%')
+        self.p_info[T('프로세스')].configure(text=f'PID {pid} · {mem / 1048576:.0f}MB · CPU {cpu:.1f}%' if pid else T('Claude 데스크탑 앱 (Code 탭)'))
         if light:
             return
         if qa is not None:

@@ -38,6 +38,8 @@ export type Peer = {
   request: string
   activity: string
   updatedAt: number
+  // 세션이 그려지는 곳 (terminal · desktop · vscode · mobile). 세션 사무실은 세션 목록 파일이 없는 데스크탑 앱 세션을 이것으로 찾는다
+  surface?: string
 }
 
 // 협업 폴더의 out-<세션>.json: 각 세션이 보낸 메시지 (그 세션만 쓴다)

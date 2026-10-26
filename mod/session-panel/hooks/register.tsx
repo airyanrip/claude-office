@@ -323,6 +323,8 @@ const refreshTitle = async ($: EngineInterface): Promise<void> => {
   }
 }
 
+let surfaceNow = ''  // session.start의 e.surface (다시 불러오면 session.start가 다시 채운다)
+
 const writePeer = async ($: EngineInterface): Promise<void> => {
   const dir = await collabDir($)
   const me = await mySession($)
@@ -337,6 +339,7 @@ const writePeer = async ($: EngineInterface): Promise<void> => {
     request: await read($, request),
     activity: current.note || (await read($, activity)),
     updatedAt: await $.clock.now(),
+    ...(surfaceNow ? { surface: surfaceNow } : {}),
   }
   await $.fs.write(`${dir}/peer-${me}.json`, JSON.stringify(peer))
 }
@@ -648,6 +651,7 @@ const nudgeText = async ($: EngineInterface): Promise<string | undefined> => {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
+    surfaceNow = e.surface ?? ''
     await $.command.register({ name: 'panel', description: '세션 패널(작업 진행·협업 세션·인계함)을 엽니다' })
     await $.command.register({ name: 'collab', description: '다른 세션과 협업: 이름 정하기, 메시지 보내기, 자동 응답 [name|send|auto]' })
     await $.command.register({ name: 'handoff', description: '지금 작업을 다른 세션이 이어받도록 인계 노트를 남깁니다 [메모]' })

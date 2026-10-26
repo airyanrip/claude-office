@@ -283,3 +283,12 @@ test('터미널에서 먼저 고르면 그 답으로 이어 가고 물음은 닫
   expect(ran.result?.answers?.q).toBe('A')
   expect(JSON.parse(files.get(`${DIR}\\ask-sess-a.json`) ?? '{}').done).toBe(true)
 })
+
+test('데스크탑 앱 세션은 상태 파일에 surface를 적는다 (세션 사무실이 세션 목록 파일 없이도 찾게)', async ($, on) => {
+  const clock = mock.clock(on)
+  const { files } = world(on)
+  await clock.set(1_000_000)
+  await $.session.start({ cwd: 'C:/work/server', surface: 'desktop', isInteractive: true })
+  await clock.advance(4000)
+  expect(JSON.parse(files.get(`${DIR}\\peer-sess-a.json`) ?? '{}')).toMatchObject({ sessionId: 'sess-a', surface: 'desktop' })
+})

@@ -107,7 +107,9 @@ or double-click `run.bat`. On first run the app:
 2. offers to install the **session-panel mod** — say yes, it is what delivers your SessionTalk / phone commands,
    choice answers and progress reports (see [session-panel mod](#session-panel-mod)).
 
-Claude Code sessions started **after** the mod is installed pick it up. Settings live in
+Claude Code sessions started **after** the mod is installed pick it up. Sessions that were already running can't load a
+new mod, so the app lists them and offers to restart them in a new terminal, continuing the same conversation
+(`--resume`; idle ones right away, busy ones when they finish). Settings live in
 `%LOCALAPPDATA%\ClaudeOffice\settings.json`.
 
 ### How to use
@@ -147,9 +149,11 @@ happens in the PC terminal. Turn Remote off when you are not using it.
 [`mod/session-panel`](mod/session-panel) is a Claude Code mod that every session loads. It writes progress reports
 and inter-session messages, delivers the commands you send from SessionTalk or the phone, and (0.3+) lets SessionTalk
 answer Claude's choice questions. The app installs and updates it for you (**☰ Menu → Session mod**): it copies the
-folder to `%USERPROFILE%\.claude\mods\session-panel` and adds that folder to `env.CLAUDE_CODE_PLUGIN_DIRS` in
+folder to `%USERPROFILE%\.claude\mods\session-panel`, adds that folder to `env.CLAUDE_CODE_PLUGIN_DIRS` and sets
+`env.CLAUDE_CODE_PLUGIN_DIR_WATCH=1` (so sessions in the **Claude desktop app's Code tab** load it too and pick up updates live) in
 `%USERPROFILE%\.claude\settings.json` (other settings are kept; the original is saved as `settings.json.office-backup`).
-To do it by hand, do those two steps. Without the mod the office still shows sessions, status, tokens and logs, but
+To do it by hand, do those steps. Desktop-app sessions appear in the office through the mod's status file.
+Without the mod the office still shows sessions, status, tokens and logs, but
 commands are not delivered, the task board stays empty and choice cards do not appear.
 
 ### Remote control security
@@ -270,7 +274,8 @@ pythonw claude_office.pyw
 1. **비서** 세션을 만들지 묻고(필요하면 `secretary` 스킬도 설치),
 2. **session-panel mod** 설치를 권해요 — 꼭 설치하세요. 세션톡·휴대폰 명령, 선택지 답, 진행 보고가 이 mod로 오가요.
 
-mod를 설치한 **뒤에** 켜는 Claude Code 세션부터 적용돼요. 설정은 `%LOCALAPPDATA%\ClaudeOffice\settings.json`에 저장돼요.
+mod를 설치한 **뒤에** 켜는 Claude Code 세션부터 적용돼요. 이미 켜져 있던 세션은 새 mod를 불러올 수 없어서, 앱이 그런 세션을 찾아
+대화를 그대로 이어서(`--resume`) 새 터미널로 다시 켤지 물어요(쉬는 세션은 바로, 일하는 세션은 일이 끝나면). 설정은 `%LOCALAPPDATA%\ClaudeOffice\settings.json`에 저장돼요.
 
 ### 사용법
 - **사무실** – 캐릭터를 누르면 오른쪽 패널에 그 세션이 보여요. 책상을 끌어 자리를 바꾸고, 탭 위로 끌어 묶어요.
@@ -300,8 +305,9 @@ Pages가 열리지 않으면 주소 복사·QR이 자동으로 PC가 직접 내�
 [`mod/session-panel`](mod/session-panel)은 모든 세션이 불러오는 Claude Code mod예요. 진행 보고와 세션 간 메시지를 쓰고,
 세션톡·휴대폰에서 보낸 명령을 전하고, (0.3 이상) Claude의 선택지 질문에 세션톡이 답할 수 있게 해요. 앱이 설치·업데이트를
 해 줘요(**☰ 메뉴 → 세션 연결 mod**): 폴더를 `%USERPROFILE%\.claude\mods\session-panel`에 복사하고 `%USERPROFILE%\.claude\settings.json`의
-`env.CLAUDE_CODE_PLUGIN_DIRS`에 그 폴더를 더해요(다른 설정은 그대로, 원래 파일은 `settings.json.office-backup`으로 백업).
-직접 하려면 이 두 가지를 똑같이 하면 돼요. mod가 없어도 세션·상태·토큰·로그는 보이지만, 명령이 전달되지 않고 작업 분배판이 비고 선택지 카드가 뜨지 않아요.
+`env.CLAUDE_CODE_PLUGIN_DIRS`에 그 폴더를 더하고 `env.CLAUDE_CODE_PLUGIN_DIR_WATCH=1`을 넣어요(다른 설정은 그대로, 원래 파일은 `settings.json.office-backup`으로 백업).
+그래서 **Claude 데스크탑 앱 Code 탭**에서 켠 세션도 mod를 쓰고, mod가 바뀌면 바로 다시 불러오며, 사무실에도 나타나요.
+직접 하려면 이 단계를 똑같이 하면 돼요. mod가 없어도 세션·상태·토큰·로그는 보이지만, 명령이 전달되지 않고 작업 분배판이 비고 선택지 카드가 뜨지 않아요.
 
 ### 원격 조종 보안
 - **열쇠 없이는 아무것도 못 해요.** 모든 요청에 기기별 열쇠가 필요하고, PC에는 열쇠의 해시만 남아요. 맞는 열쇠는 늘 통과하고 틀린 열쇠는 IP별로 늦게 답해요.

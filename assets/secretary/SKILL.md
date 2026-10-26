@@ -46,7 +46,7 @@ description: 비서 모드. 같은 PC에서 돌고 있는 다른 Claude Code 세
 
 ```json
 {
-  "sessionId": "<이 비서 세션 id = $env:CLAUDE_SESSION_ID>",
+  "sessionId": "<이 비서 세션 id (CLAUDE_SESSION_ID가 비어 있으면 scratchpad 경로의 세션 id)>",
   "updatedAt": <지금 시각 ms>,
   "summary": "한 줄 현황 요약 (60자 이내)",
   "items": [
@@ -56,6 +56,7 @@ description: 비서 모드. 같은 PC에서 돌고 있는 다른 Claude Code 세
       "title": "40자 이내 제목",
       "detail": "300자 이내 이유·설명",
       "target": "보낼 세션 이름 (peers 도구에 보이는 이름 그대로)",
+      "targetSessionId": "보낼 세션 id (이름이 겹치거나 비어 있을 때 사무실이 이것으로 찾음)",
       "prompt": "그 세션에 그대로 보낼 지시문",
       "choices": [
         {"label": "버튼 글자 (10자 이내)", "prompt": "이 버튼을 누르면 보낼 지시문", "target": "생략하면 위 target"}
